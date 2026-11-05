@@ -1,0 +1,9 @@
+[submodule "external/pyvene"]
+	path = external/pyvene
+	url = https://github.com/stanfordnlp/pyvene.git
+[submodule "external/non-linear-representation-dilemma"]
+	path = external/non-linear-representation-dilemma
+	url = https://github.com/densutter/non-linear-representation-dilemma.git
+[submodule "external/InterchangeInterventions"]
+	path = external/InterchangeInterventions
+	url = https://github.com/atticusg/InterchangeInterventions.git

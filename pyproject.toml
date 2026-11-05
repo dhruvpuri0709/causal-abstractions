@@ -1,0 +1,21 @@
+[project]
+name = "causal-abstraction-statistics"
+version = "0.1.0"
+description = "Type I error and power of IIA-based certification under DAS"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pyvene==0.1.8",
+    "torch>=2.2",
+    "numpy",
+    "scipy",
+    "pandas",
+    "statsmodels",
+    "matplotlib",
+    "tqdm",
+]
+
+[dependency-groups]
+dev = ["jupyter", "pytest"]
+
+[tool.uv]
+package = false

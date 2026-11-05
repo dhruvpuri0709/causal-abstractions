@@ -1,0 +1,142 @@
+\documentclass[11pt]{article}
+
+% Page layout: adjust margins slightly if needed to stay within 2 pages.
+\usepackage[margin=0.7in]{geometry}
+\usepackage{setspace}
+\singlespacing
+\usepackage{enumitem}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[numbers,sort&compress]{natbib}
+
+% Compact formatting to help meet the 2-page limit.
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{3pt}
+\setlist{nosep,leftmargin=*}
+\usepackage{titlesec}
+\titlespacing*{\section}{0pt}{5pt}{2pt}
+\titleformat{\section}{\normalsize\bfseries}{\thesection.}{0.5em}{}
+
+\title{Statistical Analysis of Causal Abstraction of Neural Networks}
+\author{Dhruv Puri (MS Computer Science) \and
+        Nichols Crawford Taylor (PhD Computer Science) \and
+        Likhith Mallavarapu (MS Data Science)}
+\date{CS 7200 Project Proposal, October 16, 2026}
+
+\begin{document}
+\maketitle
+\vspace{-2em}
+
+\section{Description of the Problem}
+Distributed alignment search (DAS) tests whether a neural network implements a
+high-level algorithm by learning a rotation of a hidden layer and measuring
+interchange intervention accuracy (IIA): the share of input pairs on which the
+intervened network and algorithm agree \citep{geiger2021causal, geiger2024finding}.
+High IIA is read as evidence for the algorithm, but this test is uncalibrated: the main
+results report IIA on the fitting data, as the best of several runs, without intervals,
+and IIA exceeds chance even on random networks \citep{geiger2024finding}. Whether such
+results can mislead is debated \citep{makelov2023subspacelookingforinterpretability,
+sutter2025nonlinear}.
+
+We ask how often the rule ``certify if IIA $\geq c$'' certifies an algorithm the
+network does not implement, and whether held-out evaluation, null calibration and
+selection correction fix this. The outcome is the certification decision (giving type
+I error and power), the main predictor is the reporting procedure, and the system is
+DAS applied to small networks trained on synthetic tasks with a known algorithm.
+
+\section{Summary of the Data}
+All data are simulated so the truth is known. We will use one or two tasks from the
+causal abstraction literature that have a simple high-level algorithm and can be
+generated synthetically; our leading candidate is hierarchical equality
+\citep{geiger2024finding}, where four random vectors $w, x, y, z$ are labelled true
+when $w = x$ and $y = z$ have the same truth value, and the final choice will follow a
+pilot. For each task, networks of varying width are trained to perfect accuracy; known
+positives are trained to compute the algorithm's variables \citep{geiger2022inducing},
+and known negatives are random or follow a different algorithm. The unit of
+observation is one DAS analysis of one network, yielding an IIA and a decision.
+Predictors are the procedure, hidden width, subspace size relative to width, and
+number of fitting pairs.
+
+Input pairs sharing a base input are correlated, so binomial intervals are too narrow.
+The procedures are applied to the same fits, so comparisons are paired. IIA clusters
+near chance or 1, so variances are unequal. Non-converged fits will be excluded and
+reported. Random networks may be easier negatives than real failures.
+
+\section{Background}
+DAS results are reported as point estimates, and critiques have relied on examples and
+theory rather than error rates \citep{makelov2023subspacelookingforinterpretability,
+sutter2025nonlinear}. Related statistical work compares probes against control tasks
+\citep{hewitt2019control} and frames circuit claims as hypothesis tests
+\citep{shi2024hypothesis}. We add simulated estimates of the type I error and power of
+IIA-based certification under four reporting procedures.
+
+\section{Methods}
+For network $j$ with truth $T_j \in \{0,1\}$ (known negative or positive) and procedure
+$p$, the response is the decision $Y_{jp} \in \{0,1\}$ (certified or not). The
+procedures are: (1) \emph{naive}, the largest in-sample IIA over seeds, layers and
+subspace sizes, compared with $c$; (2) \emph{held-out}, the rotation fit on one set of
+base inputs and IIA measured on disjoint base inputs; (3) \emph{null-calibrated}, a
+permutation-style $p$-value $\hat p = (1 + \#\{b: \mathrm{IIA}^{(0)}_b \geq
+\mathrm{IIA}\})/(1+B)$, where $\mathrm{IIA}^{(0)}_b$ come from the same pipeline run on
+calibration negatives and on pairs with shuffled counterfactual labels, certifying if
+$\hat p \leq 0.05$; (4) \emph{selection-corrected}, the configuration chosen on a
+selection split and tested once on a third split, or compared with the null
+distribution of the maximum IIA over all configurations. The key quantities are the
+type I error $\alpha_p(\mathbf{x}) = P(Y=1 \mid T=0, \mathbf{x})$ and power
+$\pi_p(\mathbf{x}) = P(Y=1 \mid T=1, \mathbf{x})$, where $\mathbf{x}$ holds
+$\log_2$ width, subspace size over width, and $\log$ number of fitting pairs. In each
+design cell we estimate $\alpha_p$ and $\pi_p$ as proportions with Wilson intervals and
+test $H_0\!: \alpha_p \leq 0.05$ with an exact binomial test. Across cells, the primary
+model is a logistic regression, $\mathrm{logit}\,P(Y_{jp}=1) = \beta_{0p} +
+\boldsymbol{\beta}_p^\top \mathbf{x}_j$, fit separately for negatives and positives.
+Each IIA is reported with a 95\% percentile
+interval from a cluster bootstrap that resamples base inputs, so that correlated pairs
+stay together.
+
+Because all four procedures are applied to the same networks, procedures are compared
+with McNemar's test on paired decisions and, as an alternative, a mixed-effects logistic
+regression with a random intercept per network. The calibration negatives in (3) are disjoint from
+the negatives used to estimate $\alpha_p$, so the test is not evaluated on the data that
+calibrated it. Diagnostics include binned residuals, likelihood-ratio tests for interactions, and
+checks for separation, likely when error rates are near 0 or 1, in which case we use
+Firth's penalized logistic regression. We apply Holm's correction across cells and
+report $\alpha_p$ and $\pi_p$ over a range of thresholds $c$. The main difficulty is
+cost: each DAS fit takes minutes, which limits networks per cell (30 per truth status
+gives a standard error near 0.04 at $\alpha = 0.05$); the pooled regression borrows
+strength across cells, and the pilot sets the design size. Wrong algorithms that share
+variables with the true one are partly correct, so we record the agreement of their
+counterfactual labels as a covariate.
+
+\section{Preliminary Results}
+None yet. We will first reproduce two results of \citet{geiger2024finding} (near-perfect
+IIA on a trained network; IIA above chance on wide random networks), time one DAS fit,
+and compare cluster and naive bootstrap intervals for IIA.
+
+\section{Project Timeline}
+\begin{center}
+\small
+\begin{tabular}{@{}p{0.22\linewidth}p{0.72\linewidth}@{}}
+\toprule
+\textbf{Week / Dates} & \textbf{Milestone} \\
+\midrule
+Oct. 16--23 & Set up DAS code; reproduce the published result. \\
+Oct. 24--30 & Train known positives and negatives at 3 widths; time DAS fits; fix the design. \\
+Oct. 31--Nov. 6 & Implement procedures, bootstrap and null; run naive and held-out over the design. \\
+Nov. 7--13 & First type I error estimates; interim report and presentation (Nov. 10). \\
+Nov. 14--20 & Run null-calibrated and selection-corrected procedures over the design. \\
+Nov. 21--27 & Logistic and mixed-effects models, McNemar tests, diagnostics; power analysis. \\
+Nov. 28--Dec. 4 & Robustness: wrong-algorithm negatives, sensitivity to $c$; draft report. \\
+Dec. 5--11 & Peer review (Dec. 10); final report and presentation (Dec. 11). \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+{\small
+\setlength{\bibsep}{1pt}
+\bibliographystyle{plainnat}
+\bibliography{references}
+}
+
+\end{document}
