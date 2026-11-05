@@ -611,7 +611,9 @@ def write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline, 
     L.append(headline_table(headline, "site", EVAL_CLASSES))
 
     L.append("\n## Pooled over hypotheses and n_fit (network-cluster bootstrap 95% CI)\n")
-    p = pooled[(pooled.scope == "all")].copy()
+    L.append("A percentile bootstrap collapses to [0, 0] (or [1, 1]) when no (every) network is "
+             "certified; use the per-cell one-sided Wilson bounds above in that case.\n\n")
+    p = pooled[(pooled.scope == "all") & (pooled.n_units > 0)].copy()
     p["procedure"] = p.procedure + np.where(p.procedure.isin(ORACLE), " †", "")
     L.append(_md(p[["task", "truth_class", "procedure", "n_networks", "n_units", "certified",
                     "rate", "cluster_boot_lo", "cluster_boot_hi"]]))
