@@ -42,3 +42,18 @@ def test_cluster_correlated_data_gives_wider_cluster_intervals():
         widths[m] = hi - lo
     assert widths["base"] > 2 * widths["iid"]  # design effect ~ sqrt(8)
     assert widths["twoway"] >= 0.9 * widths["base"]
+
+
+def test_twoway_counts_a_shared_source_once():
+    """If both variables take the same source input, its count multiplies the weight once."""
+    pair_base = np.array([0, 1, 2])
+    pair_src = np.array([[0, 0], [1, 2], [3, -1]])  # pair 0: one source used for V1 and V2
+    rng = np.random.default_rng(5)
+    w = bootstrap_weights("twoway", pair_base, pair_src, 200, rng)
+    # replay the same draws to get the base and source counts
+    rng = np.random.default_rng(5)
+    wb = rng.multinomial(3, np.full(3, 1 / 3), size=200)
+    ws = rng.multinomial(4, np.full(4, 1 / 4), size=200)
+    assert np.allclose(w[:, 0], wb[:, 0] * ws[:, 0])  # not ws[:, 0] ** 2
+    assert np.allclose(w[:, 1], wb[:, 1] * ws[:, 1] * ws[:, 2])
+    assert np.allclose(w[:, 2], wb[:, 2] * ws[:, 3])

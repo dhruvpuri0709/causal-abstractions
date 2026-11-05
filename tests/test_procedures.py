@@ -64,3 +64,42 @@ def test_unit_statistics_and_decisions():
     d = d[d.scope == "all"].set_index("procedure")
     assert d.loc["P1_naive", "certified"] == 1 and d.loc["F_heldout_fixed", "certified"] == 0
     assert d.loc["P3_null_shuffled", "certified"] == 0
+
+
+def test_nulls_use_only_the_same_cell_and_null_type():
+    """Calibration units of another width or another null type must not enter the null."""
+    rows = (_fits("u", [0.9] * 4, [0.9] * 4, [0.9] * 4)
+            + _fits("c_same", [0.6] * 4, [0.6] * 4, [0.5] * 4)
+            + _fits("c_other_width", [1.0] * 4, [1.0] * 4, [1.0] * 4)
+            + _fits("c_wrong", [1.0] * 4, [1.0] * 4, [1.0] * 4))
+    units = pd.DataFrame({
+        "unit_id": ["u", "c_same", "c_other_width", "c_wrong"],
+        "width": [8, 8, 16, 8], "fixed_layer": 1, "fixed_k": 4,
+        "role": ["eval", "cal", "cal", "cal"], "task": "t", "hypothesis": "h", "n_fit": 100,
+        "neg_type": [None, "random", "random", "wrong_algorithm"],
+        "truth": ["positive", "negative", "negative", "negative"]})
+    s = unit_statistics(pd.DataFrame(rows), units, {8: [2, 4], 16: [2, 4]})
+    ev, sizes = add_null_pvalues(s, units, pd.DataFrame(columns=["unit_id", "b", "converged",
+                                                                 "iia_test"]))
+    e = ev[ev.scope == "all"].iloc[0]
+    assert e.B_P3_null_random == 1 and e.P3_null_random == pytest.approx(0.5)  # 1/(1+1)
+    assert e.B_P3_null_wrong_algorithm == 1 and e.P3_null_wrong_algorithm == pytest.approx(1.0)
+    assert set(ev.scope) == {"all", "site", "k=2", "k=4"}
+
+
+def test_rates_table_holm_family_and_one_row_per_network():
+    from cas.analyze import rates_table
+    dec = pd.DataFrame({
+        "scope": "all", "task": "t", "hypothesis": ["a"] * 20 + ["b"] * 20, "n_fit": 100,
+        "truth_class": "negative_random", "procedure": "P1_naive",
+        "net_id": [f"n{i}" for i in range(20)] * 2,
+        "certified": [1.0] * 5 + [0.0] * 15 + [1.0] * 1 + [0.0] * 19})
+    r = rates_table(dec, ["scope", "task", "hypothesis", "n_fit", "truth_class", "procedure"],
+                    0.05).set_index("hypothesis")
+    p = r["binom_p_alpha_le_0.05"]
+    # Holm over the two cells of the same (scope, procedure, truth_class) family
+    assert r.loc["a", "holm_p"] == pytest.approx(min(1, 2 * p.min()))
+    assert r.loc["b", "holm_p"] == pytest.approx(max(2 * p.min(), p.max()))
+    assert (r.n_networks == 20).all()
+    with pytest.raises(ValueError):  # pooling the two hypotheses double-counts networks
+        rates_table(dec, ["scope", "task", "truth_class", "procedure"], 0.05)

@@ -77,7 +77,7 @@ def test_fit_logistic_switches_to_firth_on_separation():
     rng = np.random.default_rng(2)
     df = pd.DataFrame({"x": rng.normal(size=60), "g": np.repeat(np.arange(20), 3)})
     df["y"] = (df.x > 0).astype(int)
-    assert st.fit_logistic(df, "y", ["x"], "g")["method"] == "firth"
+    assert st.fit_logistic(df, "y", ["x"], "g")["method"].startswith("firth")
     df["y"] = (rng.random(60) < expit(df.x)).astype(int)
     assert st.fit_logistic(df, "y", ["x"], "g")["method"] == "mle_cluster_robust"
 
@@ -97,3 +97,23 @@ def test_cochran_q_and_mcnemar_match_statsmodels():
 def test_binned_residuals_shape():
     b = st.binned_residuals(np.linspace(0.1, 0.9, 100), np.r_[np.zeros(50), np.ones(50)])
     assert len(b) == 10 and b["n"].sum() == 100
+
+
+def test_cochran_permutation_close_to_chi2_for_large_n():
+    rng = np.random.default_rng(4)
+    x = (rng.random((300, 4)) < [0.3, 0.35, 0.4, 0.3]).astype(int)
+    q, p_chi2 = st.cochran_q(x)
+    q2, p_perm = st.cochran_q_permutation(x, n_perm=4000, rng=np.random.default_rng(0))
+    assert q == pytest.approx(q2)
+    assert abs(p_perm - p_chi2) < 0.05
+    # identical columns: no evidence of a difference
+    same = np.repeat(rng.integers(0, 2, size=(20, 1)), 3, axis=1)
+    assert np.isnan(st.cochran_q_permutation(same)[1])
+
+
+def test_cluster_bootstrap_wider_than_binomial_when_clusters_agree():
+    clusters = np.repeat(np.arange(10), 4)
+    y = np.repeat((np.arange(10) < 3).astype(float), 4)  # 3 of 10 clusters certified
+    lo, hi = st.cluster_bootstrap_rate(clusters, y, 4000, np.random.default_rng(1))
+    wlo, whi = st.wilson(12, 40)
+    assert (hi - lo) > 1.15 * (whi - wlo) and lo <= 0.3 <= hi

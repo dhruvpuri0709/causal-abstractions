@@ -64,9 +64,16 @@ def test_interchange_algebra():
 
 
 def test_random_network_iia_near_chance():
-    torch.manual_seed(0)
+    """A random network whose outputs actually vary (larger init than PyTorch's default, which
+    makes most random networks predict one constant class and IIA exactly 0.5): DAS fits the
+    training pairs above chance (overfitting) but held-out IIA stays near chance."""
     task = TASKS["hierarchical_equality"]
+    torch.manual_seed(0)
     m = MLP(task.input_dim, 16, 3).eval()
+    with torch.no_grad():
+        for lin in list(m.layers) + [m.head]:
+            torch.nn.init.normal_(lin.weight, std=3 / np.sqrt(lin.in_features))
+            torch.nn.init.normal_(lin.bias, std=0.1)
     for p in m.parameters():
         p.requires_grad_(False)
     rng = np.random.default_rng(3)
@@ -74,6 +81,6 @@ def test_random_network_iia_near_chance():
     test = make_split(task, "both_equality", 512, rng)
     res = fit_rotation(m, 0, 8, _acts(m, 0, fit, "both_equality"), 0,
                        FitSettings(max_steps=500))
-    iia = (predict(m, 0, _acts(m, 0, test, "both_equality"), res.R, 8)
-           == test.labels["both_equality"]).mean()
-    assert 0.4 < iia < 0.6
+    pred = predict(m, 0, _acts(m, 0, test, "both_equality"), res.R, 8)
+    assert 0.1 < pred.mean() < 0.9  # not a constant predictor, so the test can fail
+    assert 0.4 < (pred == test.labels["both_equality"]).mean() < 0.6

@@ -1,33 +1,136 @@
-"""End to end on a minuscule design: train -> fit -> analyze runs and writes its outputs."""
+"""End to end on a small design that converges: train -> fit -> analyze, plus the guards.
 
+One module-scoped run (~12 s) is shared; tests that modify outputs work on a copy.
+"""
+
+import copy
+import shutil
+
+import numpy as np
 import pandas as pd
+import pytest
 
-from cas.analyze import analyze
+from cas.analyze import IncompleteError, analyze
 from cas.config import Config
-from cas.pipeline import fit_all, train_all
+from cas.pipeline import StaleOutputError, fit_all, train_all, unit_dir
+
+SMOKE = {
+    "name": "smoke", "seed": 3,
+    "tasks": {"hierarchical_equality": {"widths": [16]}, "distributive_law": {"widths": [16]}},
+    "networks": {"eval": {"iit": 1, "random": 1, "standard": 0},
+                 "calibration": {"random": 2, "iit": 1}},
+    "train": {"iit": {"batch_size": 256, "lr": 0.003, "max_steps": 4000, "eval_every": 100,
+                      "eval_n": 1000, "target_acc": 0.98, "target_iit_acc": 0.97,
+                      "pass_acc": 0.95, "pass_iit_acc": 0.93}},
+    "das": {"layers": [1], "k_fracs": [0.25], "seeds": 1, "n_fit": [256],
+            "n_select": 256, "n_test": 256,
+            "fit": {"max_steps": 600, "window": 20, "patience": 3, "lr": 0.02}},
+    "null": {"shuffle_B": 2}, "analysis": {"bootstrap_B": 50},
+}
 
 
-def test_pipeline_end_to_end(tmp_path):
-    cfg = Config.from_dict({
-        "name": "smoke", "seed": 3, "results_dir": str(tmp_path),
-        "tasks": {"hierarchical_equality": {"widths": [8]},
-                  "distributive_law": {"widths": [8]}},
-        "networks": {"eval": {"iit": 1, "random": 1, "standard": 1},
-                     "calibration": {"random": 2, "iit": 2}},
-        "train": {"standard": {"max_steps": 200}, "iit": {"max_steps": 200}},
-        "das": {"layers": [1], "k_fracs": [0.25], "seeds": 1, "n_fit": [64],
-                "n_select": 64, "n_test": 64, "fit": {"max_steps": 100}},
-        "null": {"shuffle_B": 2},
-        "analysis": {"bootstrap_B": 50},
-    })
+def _cfg(root, **over):
+    d = copy.deepcopy(SMOKE)
+    d["results_dir"] = str(root)
+    for path, val in over.items():
+        node = d
+        keys = path.split(".")
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = val
+    return Config.from_dict(d)
+
+
+@pytest.fixture(scope="module")
+def smoke(tmp_path_factory):
+    root = tmp_path_factory.mktemp("res")
+    cfg = _cfg(root)
     train_all(cfg, workers=1, device="cpu")
     fit_all(cfg, workers=1, device="cpu")
-    n_files = len(list((tmp_path / "smoke" / "fits").rglob("*.npz")))
-    fit_all(cfg, workers=1, device="cpu")  # resumable: nothing new
-    assert len(list((tmp_path / "smoke" / "fits").rglob("*.npz"))) == n_files
-    summary = analyze(cfg)
-    assert summary.exists()
-    dec = pd.read_csv(tmp_path / "smoke" / "tables" / "decisions.csv")
-    assert set(dec.truth_class) <= {"positive", "negative_random", "negative_wrong_algorithm",
-                                    "unknown_standard"}
-    assert (tmp_path / "smoke" / "tables" / "bootstrap_widths.csv").exists()
+    analyze(cfg)
+    return root
+
+
+def _copy(smoke, tmp_path):
+    shutil.copytree(smoke / "smoke", tmp_path / "smoke")
+    return tmp_path
+
+
+def test_decisions_are_real(smoke):
+    dec = pd.read_csv(smoke / "smoke" / "tables" / "decisions.csv")
+    main = dec[dec.scope == "all"]
+    thr = main[main.procedure.isin(["P1_naive", "P2_heldout", "F_heldout_fixed", "P4_split"])]
+    assert thr.certified.notna().all()
+    assert (thr[thr.truth_class == "positive"].certified == 1).all()
+    assert (thr[thr.truth_class == "negative_random"].certified == 0).all()
+    assert (smoke / "smoke" / "summary.md").exists()
+    assert (smoke / "smoke" / "tables" / "bootstrap_widths.csv").exists()
+
+
+def test_resume_writes_nothing_new(smoke, tmp_path):
+    root = _copy(smoke, tmp_path)
+    cfg = _cfg(root)
+    n_files = len(list((root / "smoke" / "fits").rglob("*.npz")))
+    res = fit_all(cfg, workers=1, device="cpu")
+    assert sum(r["fits"] for r in res) == 0
+    assert len(list((root / "smoke" / "fits").rglob("*.npz"))) == n_files
+
+
+def test_changed_das_settings_are_refused_then_forced(smoke, tmp_path):
+    root = _copy(smoke, tmp_path)
+    cfg = _cfg(root, **{"das.n_test": 128})
+    with pytest.raises(StaleOutputError):
+        fit_all(cfg, workers=1, device="cpu")
+    with pytest.raises(StaleOutputError):
+        analyze(cfg)
+    fit_all(cfg, workers=1, device="cpu", force=True)
+    analyze(cfg)
+    ev = pd.read_csv(root / "smoke" / "tables" / "bootstrap_intervals.csv")
+    assert (ev.n_pairs == 128).all()
+
+
+def test_changed_training_budget_is_refused_then_forced(smoke, tmp_path):
+    root = _copy(smoke, tmp_path)
+    cfg = _cfg(root, **{"train.iit.max_steps": 3000})
+    with pytest.raises(StaleOutputError):
+        train_all(cfg, workers=1, device="cpu")
+    with pytest.raises(SystemExit):  # fit refuses to run on stale networks
+        fit_all(cfg, workers=1, device="cpu")
+    metas = train_all(cfg, workers=1, device="cpu", force=True)
+    assert all(m["fingerprint"] for m in metas)
+    with pytest.raises(StaleOutputError):  # the fits now belong to the old networks
+        fit_all(cfg, workers=1, device="cpu")
+
+
+def test_grid_filter_temp_files_and_incomplete_units(smoke, tmp_path):
+    root = _copy(smoke, tmp_path)
+    cfg = _cfg(root)
+    unit = cfg.units()[0]
+    d = unit_dir(cfg, unit.unit_id)
+    shutil.copy(d / "L1_k4_s0.npz", d / "L2_k99_s7.npz")  # outside the grid: ignored
+    (d / "pairs.npz.part").write_bytes(b"garbage")  # leftover temp file: ignored
+    analyze(cfg)
+    fits = pd.read_csv(root / "smoke" / "tables" / "fits.csv")
+    assert not ((fits.layer == 2) & (fits.k == 99)).any()
+    (d / "L1_k4_s0.npz").unlink()
+    with pytest.raises(IncompleteError):
+        analyze(cfg)
+    analyze(cfg, allow_incomplete=True)
+    assert "DROPPED" in (root / "smoke" / "summary.md").read_text()
+
+
+def test_same_results_with_one_and_two_workers(tmp_path):
+    small = {"tasks": {"hierarchical_equality": {"widths": [16]}},
+             "networks.eval": {"iit": 1, "random": 1, "standard": 0},
+             "networks.calibration": {"random": 2, "iit": 0}}
+    tables = []
+    for workers in (1, 2):
+        cfg = _cfg(tmp_path / f"w{workers}", **small)
+        train_all(cfg, workers=workers, device="cpu")
+        fit_all(cfg, workers=workers, device="cpu")
+        analyze(cfg)
+        tables.append(pd.read_csv(tmp_path / f"w{workers}" / "smoke" / "tables" / "fits.csv")
+                      .drop(columns=["seconds"]).sort_values(["unit_id", "layer", "k"])
+                      .reset_index(drop=True))
+    pd.testing.assert_frame_equal(tables[0], tables[1])
+    assert np.isfinite(tables[0].iia_test).all()
