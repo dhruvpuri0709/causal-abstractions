@@ -13,6 +13,7 @@ trained:            # Table 1 analogue: hierarchical equality, |N| = 16
   n_test: 2048
   iit_layer: 0       # for the IIT-trained network
   iit_k: 4
+  standard_seeds: 5  # extra standard networks to show seed-to-seed variation at (layer 0, k 8)
 
 random:             # §4.4 analogue: frozen random networks, k = N/2, first layer
   widths: [16, 64, 256]   # add 1024 with --widths 16,64,256,1024 (slow); 4096 is impractical

@@ -141,6 +141,35 @@ def reproduce(config_path: str, device: str = "cpu", widths: str | None = None) 
         report.append(_table(rows, ["layer", "k", "best_in_sample", "held_out_of_best",
                                     "mean_in_sample", "geiger", "seconds_per_fit"]))
 
+    # 2b. seed-to-seed variation of standard networks at the paper's best site
+    n_extra = tr.get("standard_seeds", 0)
+    if n_extra:
+        print(f"2b. {n_extra} more standard networks (layer 0, k = 8)")
+        vrows = []
+        for i in range(n_extra):
+            nseed = derive_seed(seed, "net", "standard-variation", i)
+            model = new_network(he, tr["width"], tr["n_layers"], nseed).to(device)
+            info = train_standard(model, he, np.random.default_rng(nseed),
+                                  cfg["train"]["standard"], device)
+            for p in model.parameters():
+                p.requires_grad_(False)
+            acc = task_accuracy(model, he, 10000, np.random.default_rng(1), device)
+            r = das_grid(model, he, [0], [8], tr["seeds"], tr["n_fit"], tr["n_test"],
+                         settings, seed, device, f"variation-{i}")[0]
+            vrows.append({"network": i, "train_steps": info["steps"], "task_acc": acc,
+                          "best_in_sample": r["best_in_sample"],
+                          "held_out_of_best": r["held_out_of_best"]})
+        vals = [r["best_in_sample"] for r in vrows]
+        report.append(f"\n### Seed-to-seed variation: {n_extra} more standard networks, layer 0, "
+                      f"k = 8 (paper: 1.00)\n\n")
+        report.append(_table(vrows, ["network", "train_steps", "task_acc", "best_in_sample",
+                                     "held_out_of_best"]))
+        report.append(f"\nRange of best in-sample IIA: {min(vals):.3f}-{max(vals):.3f}. "
+                      "Task-trained networks in this setup do **not** reliably reach the "
+                      "near-perfect IIA of Table 1; training 20 000 steps (to 0.9998 accuracy) "
+                      "or fitting DAS on 65 536 pairs did not change this in our checks "
+                      "(see docs/code/running.md). IIT-trained networks do.\n")
+
     # 3. random networks
     report.append("\n## 3. Frozen random networks (§4.4 analogue)\n\n"
                   f"Hierarchical equality, 16-dim input, 3 hidden layers of width N, never "
