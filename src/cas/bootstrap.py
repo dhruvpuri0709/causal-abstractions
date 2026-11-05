@@ -7,10 +7,12 @@ Three resampling schemes, all written as random weights on pairs (IIA* = sum w c
 * ``base``:    base inputs resampled with replacement; a pair's weight is its base's count
                (one-way cluster bootstrap, cf. Cameron, Gelbach & Miller 2008).
 * ``twoway``:  base inputs and source inputs resampled independently; a pair's weight is
-               (count of its base) x (product of the counts of its sources).  This is the
-               "pigeonhole" product bootstrap for crossed factors (Owen 2007), extended to pairs
-               with two sources by multiplying both source counts.  Owen shows it is mildly
-               conservative (it over-estimates the variance by the small "interaction" terms).
+               (count of its base) x (product of the counts of its distinct sources).  This is
+               the "pigeonhole" product bootstrap for crossed factors (Owen 2007), extended to
+               pairs with two sources by multiplying both source counts.  It over-counts the
+               pair-level variance; with inputs used in at most 2 pairs (our design) its
+               intervals are about 2x too wide (see docs/code/procedures_and_statistics.md).
+               ``base`` is the recommended primary interval.
 """
 
 from __future__ import annotations
@@ -46,6 +48,8 @@ def bootstrap_weights(method: str, pair_base: np.ndarray, pair_src: np.ndarray, 
     for i in range(pair_src.shape[1]):
         col = pair_src[:, i]
         has = col >= 0
+        if i > 0:  # a source shared by both variables is one input: count it once
+            has &= ~np.any(pair_src[:, :i] == col[:, None], axis=1)
         idx = np.searchsorted(uniq, col[has])
         w[:, has] *= ws[:, idx]
     return w

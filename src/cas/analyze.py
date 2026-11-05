@@ -3,6 +3,15 @@
 Everything here is computed offline from results/<name>/fits and results/<name>/networks; rerun
 it as often as you like.  Outputs go to results/<name>/tables, results/<name>/figures and
 results/<name>/summary.md.
+
+Only fits in the configured grid are read (layers x k x seeds, shuffle b < shuffle_B), and every
+file's fingerprint must match the current config.  Units with missing fits are an error unless
+``allow_incomplete`` is set, in which case they are dropped and listed in summary.md.
+
+**Independence.**  A network contributes one analysis unit per (hypothesis, n_fit), so rates and
+tests are computed within a cell (task, hypothesis, n_fit) — pooled over widths, where every
+network appears exactly once — or within (task, hypothesis, width, n_fit).  Summaries pooled over
+hypotheses or n_fit use a cluster bootstrap over networks, never a binomial interval.
 """
 
 from __future__ import annotations
@@ -20,8 +29,9 @@ from tqdm import tqdm
 from . import stats as st
 from .bootstrap import METHODS, bootstrap_iia, percentile_interval
 from .config import Config, derive_seed
-from .pairs import load_splits
-from .pipeline import unit_dir
+from .pairs import load_fingerprint, load_splits
+from .pipeline import (StaleOutputError, expected_unit_fingerprints, fit_name,
+                       read_unit_fingerprint, shuffle_name, unit_dir)
 from .procedures import (ALL_PROCS, CELL, PROC_INFO, THRESHOLD_PROCS, add_null_pvalues,
                          decisions, unit_statistics)
 
@@ -30,6 +40,13 @@ EVAL_CLASSES = CLASSES[:3]  # standard networks are descriptive only, never in a
 COLORS = {"positive": "#2a78d6", "negative_random": "#eb6834",
           "negative_wrong_algorithm": "#1baf7a", "unknown_standard": "#8a8986"}
 X_COLS = ["log2_width", "k_frac", "log_n_fit"]
+HCELL = ["task", "hypothesis", "n_fit"]  # headline cell: pooled over widths, 1 row per network
+PRIMARY = THRESHOLD_PROCS  # Cochran's Q is restricted to these
+ORACLE = {"P3_null_wrong_algorithm", "P4_maxT_wrong_algorithm"}
+
+
+class IncompleteError(SystemExit):
+    pass
 
 
 # ---- loading ------------------------------------------------------------------------------
@@ -50,26 +67,60 @@ def load_units(cfg: Config) -> pd.DataFrame:
     return df
 
 
-def load_fits(cfg: Config, units: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    fit_rows, shuf_rows = [], []
-    for uid in tqdm(units["unit_id"], desc="load fits"):
-        d = unit_dir(cfg, uid)
-        if not d.exists():
+def load_fits(cfg: Config, units: pd.DataFrame):
+    """Fits of the configured grid for the given units.
+
+    Returns (fits, shuffle, incomplete) where incomplete lists units with missing files.
+    Raises StaleOutputError if any unit directory, pair file or fit has another fingerprint.
+    """
+    expected = expected_unit_fingerprints(cfg)
+    fit_rows, shuf_rows, incomplete, stale = [], [], [], []
+    for u in tqdm(list(units.itertuples()), desc="load fits"):
+        fp = expected[u.unit_id]
+        d = unit_dir(cfg, u.unit_id)
+        if read_unit_fingerprint(cfg, u.unit_id) not in (None, fp):
+            stale.append(u.unit_id)
             continue
-        for f in sorted(d.glob("*.npz")):
-            if f.name == "pairs.npz":
+        if (d / "pairs.npz").exists() and load_fingerprint(d / "pairs.npz") != fp:
+            stale.append(u.unit_id)
+            continue
+        missing = 0
+        for layer, k, s in cfg.das_configs(u.width):
+            f = d / fit_name(layer, k, s)
+            if not f.exists():
+                missing += 1
                 continue
             z = np.load(f)
             meta = json.loads(str(z["meta"]))
-            if f.name.startswith("shuffle"):
-                shuf_rows.append({**meta, "iia_test": z["correct_test"].mean()})
-            else:
-                fit_rows.append({**meta, **{f"iia_{s}": z[f"correct_{s}"].mean()
-                                            for s in ("fit", "select", "test")}})
+            if meta.get("fingerprint") != fp:
+                stale.append(f"{u.unit_id}/{f.name}")
+                continue
+            pred = z["pred_test"]
+            fit_rows.append({**meta, **{f"iia_{sp}": z[f"correct_{sp}"].mean()
+                                        for sp in ("fit", "select", "test")},
+                             "test_pred_constant": bool(pred.min() == pred.max())})
+        B = cfg["null"]["shuffle_B"] if u.role == "eval" else 0
+        for b in range(B):
+            f = d / shuffle_name(b)
+            if not f.exists():
+                missing += 1
+                continue
+            z = np.load(f)
+            meta = json.loads(str(z["meta"]))
+            if meta.get("fingerprint") != fp:
+                stale.append(f"{u.unit_id}/{f.name}")
+                continue
+            shuf_rows.append({**meta, "iia_test": z["correct_test"].mean()})
+        if missing:
+            incomplete.append({"unit_id": u.unit_id, "missing_files": missing})
+    if stale:
+        raise StaleOutputError(
+            f"{len(stale)} fit outputs were made with different settings (e.g. {stale[0]}); "
+            "rerun `cas fit --force` or use a new `name`.")
     fits = pd.DataFrame(fit_rows)
     shuf = pd.DataFrame(shuf_rows, columns=["unit_id", "b", "converged", "iia_test", "seconds",
                                             "steps", "stop_reason"])
-    return fits, shuf
+    return fits, shuf, pd.DataFrame(incomplete, columns=["unit_id", "missing_files"])
 
 
 def label_agreement(cfg: Config, units: pd.DataFrame) -> pd.Series:
@@ -93,36 +144,72 @@ def rate_row(dec: pd.Series) -> dict:
 
 
 def rates_table(dec: pd.DataFrame, by: list[str], alpha0: float) -> pd.DataFrame:
+    """Binomial rates per group; each group must contain each network at most once.
+
+    For negatives: exact one-sided binomial p for H0: alpha <= alpha0 and Holm's adjustment
+    across the groups that share (scope, procedure, truth_class).
+    """
     rows = []
     for key, g in dec.groupby(by, dropna=False):
+        g = g.dropna(subset=["certified"])
+        if g["net_id"].duplicated().any():
+            raise ValueError(f"group {key} has several units per network; rates would treat "
+                             "dependent units as independent")
         r = dict(zip(by, key)) | rate_row(g["certified"])
+        r["n_networks"] = g["net_id"].nunique()
         r["binom_p_alpha_le_0.05"] = (st.binom_test_greater(r["certified"], r["n"], alpha0)
                                       if str(r.get("truth_class", "")).startswith("negative")
                                       else np.nan)
         rows.append(r)
     out = pd.DataFrame(rows)
-    # Holm across cells, separately for each procedure x negative type
     out["holm_p"] = np.nan
-    for _, g in out.groupby(["procedure", "truth_class"]):
+    fam = [c for c in ("scope", "procedure", "truth_class") if c in out]
+    for _, g in out.groupby(fam):
         out.loc[g.index, "holm_p"] = st.holm(g["binom_p_alpha_le_0.05"].to_numpy())
     return out
 
 
-def threshold_sweep(dec_all: pd.DataFrame, thresholds, alpha: float) -> pd.DataFrame:
+def pooled_rates(dec: pd.DataFrame, by: list[str], seed: int, B: int = 2000) -> pd.DataFrame:
+    """Rates pooled over cells, with a 95% cluster-bootstrap interval over networks."""
     rows = []
-    for c in thresholds:
-        d = dec_all.copy()
-        thr = d.procedure.isin(THRESHOLD_PROCS)
-        d.loc[thr, "certified"] = np.where(d.loc[thr, "statistic"].isna(), np.nan,
-                                           d.loc[thr, "statistic"] >= c)
-        for key, g in d.groupby(["task", "truth_class", "procedure"]):
-            rows.append(dict(zip(["task", "truth_class", "procedure"], key), c=c)
-                        | rate_row(g["certified"]))
+    for key, g in dec.groupby(by, dropna=False):
+        g = g.dropna(subset=["certified"])
+        lo, hi = st.cluster_bootstrap_rate(
+            g["net_id"], g["certified"], B, np.random.default_rng(derive_seed(seed, *key)))
+        rows.append(dict(zip(by, key)) | {"n_units": len(g), "n_networks": g.net_id.nunique(),
+                                          "certified": int(g.certified.sum()),
+                                          "rate": g.certified.mean() if len(g) else np.nan,
+                                          "cluster_boot_lo": lo, "cluster_boot_hi": hi})
     return pd.DataFrame(rows)
 
 
+def recertify(dec: pd.DataFrame, c: float) -> pd.DataFrame:
+    d = dec.copy()
+    thr = d.procedure.isin(THRESHOLD_PROCS)
+    d.loc[thr, "certified"] = np.where(d.loc[thr, "statistic"].isna(), np.nan,
+                                       d.loc[thr, "statistic"] >= c)
+    return d
+
+
+def threshold_sweep(dec_all: pd.DataFrame, thresholds, seed: int):
+    """Per-cell rates (one row per network) and per-task pooled rates (network bootstrap)."""
+    cells, pooled = [], []
+    for c in thresholds:
+        d = recertify(dec_all, c)
+        for key, g in d.groupby(HCELL + ["truth_class", "procedure"]):
+            cells.append(dict(zip(HCELL + ["truth_class", "procedure"], key), c=c)
+                         | rate_row(g["certified"]))
+        p = pooled_rates(d, ["task", "truth_class", "procedure"], seed, B=500)
+        pooled.append(p.assign(c=c))
+    return pd.DataFrame(cells), pd.concat(pooled, ignore_index=True)
+
+
 def regressions(dec_k: pd.DataFrame, figdir: Path) -> pd.DataFrame:
-    """Logit(certified) ~ log2 width + k/width + log n_fit, by task x truth class x procedure."""
+    """Logit(certified) ~ log2 width + k/width + log n_fit, by task x truth class x procedure.
+
+    Rows are (unit, k); a network contributes several rows, so MLE uses cluster-robust SEs by
+    network (Firth, used on separation, has model-based SEs; see the method column).
+    """
     rows, panels = [], []
     for (task, cls, proc), g in dec_k.groupby(["task", "truth_class", "procedure"]):
         if cls not in EVAL_CLASSES:
@@ -133,7 +220,8 @@ def regressions(dec_k: pd.DataFrame, figdir: Path) -> pd.DataFrame:
         g = g.assign(y=g["certified"].astype(int))
         r = st.fit_logistic(g, "y", X_COLS, group="net_id")
         row = {"task": task, "truth_class": cls, "procedure": proc, "n": r["n"],
-               "events": r["events"], "method": r["method"], "converged": r["converged"]}
+               "n_networks": g.net_id.nunique(), "events": r["events"], "method": r["method"],
+               "converged": r["converged"]}
         for name in ["const"] + X_COLS:
             row[f"b_{name}"] = r["params"].get(name, np.nan)
             row[f"se_{name}"] = r["bse"].get(name, np.nan)
@@ -154,50 +242,58 @@ def regressions(dec_k: pd.DataFrame, figdir: Path) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def paired_tests(dec_all: pd.DataFrame) -> pd.DataFrame:
-    """Cochran's Q over all procedures available for every unit, then pairwise exact McNemar."""
+def paired_tests(dec_all: pd.DataFrame, seed: int) -> pd.DataFrame:
+    """Per cell (task, hypothesis, n_fit) x truth class, one row per network.
+
+    Primary: pairwise exact McNemar over all procedures available for every unit, Holm-adjusted
+    within the cell.  Secondary: Cochran's Q over the threshold procedures with a permutation
+    p-value.
+    """
     rows = []
-    for (task, cls), g in dec_all.groupby(["task", "truth_class"]):
-        wide = g.pivot_table(index="unit_id", columns="procedure", values="certified",
+    for key, g in dec_all.groupby(HCELL + ["truth_class"]):
+        wide = g.pivot_table(index="net_id", columns="procedure", values="certified",
                              aggfunc="first")
-        wide = wide[[p for p in ALL_PROCS if p in wide and wide[p].notna().all()]]
-        wide = wide.dropna()
+        assert not g.groupby(["net_id", "procedure"]).size().gt(1).any()
+        wide = wide[[p for p in ALL_PROCS if p in wide and wide[p].notna().all()]].dropna()
         if wide.shape[1] < 2 or len(wide) < 2:
             continue
-        q, pq = st.cochran_q(wide.to_numpy())
+        prim = wide[[p for p in PRIMARY if p in wide]]
+        q, pq = (st.cochran_q_permutation(prim.to_numpy(),
+                                          rng=np.random.default_rng(derive_seed(seed, *key)))
+                 if prim.shape[1] >= 2 else (np.nan, np.nan))
         pairs = list(combinations(wide.columns, 2))
         res = [st.mcnemar_exact(wide[a].to_numpy(), wide[b].to_numpy()) for a, b in pairs]
         adj = st.holm([r[2] for r in res])
         for (a, b), (n01, n10, p), pa in zip(pairs, res, adj):
-            rows.append({"task": task, "truth_class": cls, "n_units": len(wide),
-                         "cochran_q": q, "cochran_p": pq, "proc_a": a, "proc_b": b,
-                         "rate_a": wide[a].mean(), "rate_b": wide[b].mean(),
-                         "only_a": n01, "only_b": n10, "mcnemar_p": p, "mcnemar_p_holm": pa})
+            rows.append(dict(zip(HCELL + ["truth_class"], key)) | {
+                "n_networks": len(wide), "cochran_q_primary": q, "cochran_perm_p": pq,
+                "proc_a": a, "proc_b": b, "rate_a": wide[a].mean(), "rate_b": wide[b].mean(),
+                "only_a": n01, "only_b": n10, "mcnemar_p": p, "mcnemar_p_holm": pa})
     return pd.DataFrame(rows)
 
 
-def bootstrap_table(cfg: Config, ev_all: pd.DataFrame, fits: pd.DataFrame) -> pd.DataFrame:
-    """95% percentile intervals for the fixed-config IIA (fit and test split), 3 schemes."""
+def bootstrap_table(cfg: Config, ev_all: pd.DataFrame) -> pd.DataFrame:
+    """95% percentile intervals for the held-out (test split) fixed-config IIA, 3 schemes.
+
+    Only the test split: on the fit split R was trained on the very pairs being resampled, so
+    resampling them does not reflect refitting.
+    """
     B = cfg["analysis"]["bootstrap_B"]
     rows = []
     for r in tqdm(list(ev_all.itertuples()), desc="bootstrap"):
-        f = unit_dir(cfg, r.unit_id) / f"L{r.fixed_layer}_k{r.fixed_k}_s0.npz"
+        f = unit_dir(cfg, r.unit_id) / fit_name(r.fixed_layer, r.fixed_k, 0)
         if not f.exists():
             continue
-        z = np.load(f)
-        splits = load_splits(unit_dir(cfg, r.unit_id) / "pairs.npz")
-        for split in ("fit", "test"):
-            c = z[f"correct_{split}"]
-            sp = splits[split]
-            for method in METHODS:
-                rng = np.random.default_rng(derive_seed(cfg["seed"], "boot", r.unit_id,
-                                                        split, method))
-                reps = bootstrap_iia(c, sp.pair_base, sp.pair_src, method, B, rng)
-                lo, hi = percentile_interval(reps)
-                rows.append({"unit_id": r.unit_id, "task": r.task, "truth_class": r.truth_class,
-                             "width": r.width, "n_fit": r.n_fit, "split": split,
-                             "n_pairs": len(c), "iia": c.mean(), "method": method,
-                             "lo": lo, "hi": hi, "width_ci": hi - lo})
+        c = np.load(f)["correct_test"]
+        sp = load_splits(unit_dir(cfg, r.unit_id) / "pairs.npz")["test"]
+        for method in METHODS:
+            rng = np.random.default_rng(derive_seed(cfg["seed"], "boot", r.unit_id, method))
+            reps = bootstrap_iia(c, sp.pair_base, sp.pair_src, method, B, rng)
+            lo, hi = percentile_interval(reps)
+            rows.append({"unit_id": r.unit_id, "net_id": r.net_id, "task": r.task,
+                         "truth_class": r.truth_class, "width": r.width, "n_fit": r.n_fit,
+                         "n_pairs": len(c), "iia": c.mean(), "method": method,
+                         "lo": lo, "hi": hi, "width_ci": hi - lo})
     return pd.DataFrame(rows)
 
 
@@ -242,11 +338,11 @@ def _plot_binned_residuals(panels, figdir: Path):
 
 def plot_iia_distributions(ev_all: pd.DataFrame, figdir: Path):
     plt = _plt()
-    stats_ = ["P1_naive", "P2_heldout", "F_insample_fixed", "F_heldout_fixed", "P4_split"]
     for task, g in ev_all.groupby("task"):
-        fig, axes = plt.subplots(1, len(stats_), figsize=(2.7 * len(stats_), 2.8), sharey=True)
+        fig, axes = plt.subplots(1, len(THRESHOLD_PROCS), figsize=(2.7 * len(THRESHOLD_PROCS),
+                                                                   2.8), sharey=True)
         classes = [c for c in CLASSES if c in set(g.truth_class)]
-        for ax, s in zip(axes, stats_):
+        for ax, s in zip(axes, THRESHOLD_PROCS):
             for i, cls in enumerate(classes):
                 v = g.loc[g.truth_class == cls, s].dropna().to_numpy()
                 jitter = np.random.default_rng(i).uniform(-0.18, 0.18, len(v))
@@ -263,48 +359,46 @@ def plot_iia_distributions(ev_all: pd.DataFrame, figdir: Path):
         plt.close(fig)
 
 
-def plot_sweep(sweep: pd.DataFrame, figdir: Path):
+def plot_sweep(pooled: pd.DataFrame, figdir: Path):
     plt = _plt()
-    for task, g in sweep.groupby("task"):
+    for task, g in pooled.groupby("task"):
         procs = [p for p in THRESHOLD_PROCS if p in set(g.procedure)]
         fig, axes = plt.subplots(1, len(procs), figsize=(2.8 * len(procs), 2.8), sharey=True)
-        for ax, proc in zip(np.atleast_1d(axes), procs):
+        axes = np.atleast_1d(axes)
+        for ax, proc in zip(axes, procs):
             for cls in EVAL_CLASSES:
                 h = g[(g.procedure == proc) & (g.truth_class == cls)].sort_values("c")
-                if h.empty or h["n"].max() == 0:
+                if h.empty or h["n_units"].max() == 0:
                     continue
-                ax.fill_between(h.c, h.wilson_lo, h.wilson_hi, color=COLORS[cls], alpha=0.15,
-                                lw=0)
+                ax.fill_between(h.c, h.cluster_boot_lo, h.cluster_boot_hi, color=COLORS[cls],
+                                alpha=0.15, lw=0)
                 ax.plot(h.c, h.rate, "-o", ms=3, lw=2, color=COLORS[cls], label=cls)
             ax.axhline(0.05, color="#8a8986", lw=0.8, ls="--")
             ax.set_title(proc, fontsize=9)
             ax.set_xlabel("threshold c")
-        np.atleast_1d(axes)[0].set_ylabel("certification rate (α̂ or π̂)")
-        if np.atleast_1d(axes)[-1].get_legend_handles_labels()[0]:
-            np.atleast_1d(axes)[-1].legend(fontsize=7, frameon=False)
-        fig.suptitle(f"{task}: certification rate vs threshold (bands: Wilson 95%; dashed: 0.05)",
-                     fontsize=10)
+        axes[0].set_ylabel("certification rate (α̂ or π̂)")
+        if axes[-1].get_legend_handles_labels()[0]:
+            axes[-1].legend(fontsize=7, frameon=False)
+        fig.suptitle(f"{task}: certification rate vs threshold, pooled over cells "
+                     "(bands: 95% network-cluster bootstrap; dashed: 0.05)", fontsize=10)
         fig.tight_layout()
         fig.savefig(figdir / f"threshold_sweep_{task}.png", dpi=130)
         plt.close(fig)
 
 
-def plot_bootstrap(bw: pd.DataFrame, figdir: Path):
-    if bw.empty:
+def plot_bootstrap(boot: pd.DataFrame, figdir: Path):
+    if boot.empty:
         return
     plt = _plt()
-    piv = bw.pivot_table(index=["unit_id", "split"], columns="method", values="width_ci")
+    piv = boot.pivot_table(index="unit_id", columns="method", values="width_ci")
     fig, axes = plt.subplots(1, 2, figsize=(7, 3.2))
     for ax, other, color in zip(axes, ("base", "twoway"), ("#2a78d6", "#eb6834")):
-        for split, mk in (("fit", "o"), ("test", "s")):
-            p = piv.xs(split, level="split")
-            ax.plot(p["iid"], p[other], mk, ms=4, alpha=0.7, color=color, label=f"{split} split")
+        ax.plot(piv["iid"], piv[other], "o", ms=4, alpha=0.7, color=color)
         m = np.nanmax(piv.to_numpy()) * 1.05
         ax.plot([0, m], [0, m], color="#8a8986", lw=0.8)
         ax.set_xlabel("iid-pair interval width")
         ax.set_ylabel(f"{other} interval width")
-        ax.legend(fontsize=7, frameon=False)
-    fig.suptitle("Bootstrap 95% interval widths for fixed-config IIA (one dot per unit)",
+    fig.suptitle("Bootstrap 95% interval widths, held-out fixed-config IIA (one dot per unit)",
                  fontsize=10)
     fig.tight_layout()
     fig.savefig(figdir / "bootstrap_widths.png", dpi=130)
@@ -312,17 +406,29 @@ def plot_bootstrap(bw: pd.DataFrame, figdir: Path):
 
 
 # ---- driver -------------------------------------------------------------------------------
-def analyze(cfg: Config) -> Path:
+def analyze(cfg: Config, allow_incomplete: bool = False) -> Path:
     t0 = time.perf_counter()
     out = cfg.out_dir
     tables, figdir = out / "tables", out / "figures"
     tables.mkdir(parents=True, exist_ok=True)
     figdir.mkdir(parents=True, exist_ok=True)
     a = cfg["analysis"]
-    c, alpha = a["threshold"], a["alpha"]
+    c, alpha, seed = a["threshold"], a["alpha"], cfg["seed"]
 
     units = load_units(cfg)
-    fits, shuf = load_fits(cfg, units)
+    ok_units = units[units.net_passed == True]  # noqa: E712
+    fits, shuf, incomplete = load_fits(cfg, ok_units)
+    if len(incomplete):
+        incomplete.to_csv(tables / "incomplete_units.csv", index=False)
+        if not allow_incomplete:
+            raise IncompleteError(
+                f"{len(incomplete)} units have missing fits (see {tables}/incomplete_units.csv)"
+                "; run `cas fit` to complete them, or `cas analyze --allow-incomplete` to drop "
+                "those units (flagged in summary.md)")
+        drop = set(incomplete.unit_id)
+        ok_units = ok_units[~ok_units.unit_id.isin(drop)]
+        fits = fits[~fits.unit_id.isin(drop)]
+        shuf = shuf[~shuf.unit_id.isin(drop)]
     if fits.empty:
         raise SystemExit("no fits found; run `cas fit` first")
     fits = fits.merge(units[["unit_id", "task", "width", "kind", "role", "truth_class"]],
@@ -330,7 +436,6 @@ def analyze(cfg: Config) -> Path:
     fits.to_csv(tables / "fits.csv", index=False)
     shuf.to_csv(tables / "shuffle_fits.csv", index=False)
 
-    # exclusions
     nets = units.drop_duplicates("net_id")
     excl_nets = (nets.groupby(["task", "width", "kind", "alg", "role"], dropna=False)
                  .agg(networks=("net_id", "size"),
@@ -343,7 +448,6 @@ def analyze(cfg: Config) -> Path:
                  .reset_index())
     excl_fits.to_csv(tables / "excluded_fits.csv", index=False)
 
-    ok_units = units[units.net_passed == True]  # noqa: E712
     ks_by_width = {w: cfg.ks(w) for w in units.width.unique()}
     ustats = unit_statistics(fits[["unit_id", "layer", "k", "seed_index", "converged",
                                    "iia_fit", "iia_select", "iia_test"]],
@@ -360,36 +464,40 @@ def analyze(cfg: Config) -> Path:
 
     dec = decisions(ev, c, alpha)
     dec.to_csv(tables / "decisions.csv", index=False)
+    dec_main = dec[dec.scope.isin(["all", "site"])]
     dec_all = dec[dec.scope == "all"]
-    dec_k = dec[dec.scope != "all"]
+    dec_k = dec[dec.scope.str.startswith("k=")]
 
-    cell_rates = rates_table(dec_all, CELL + ["truth_class", "procedure"], alpha)
+    headline = rates_table(dec_main, ["scope"] + HCELL + ["truth_class", "procedure"], alpha)
+    headline.to_csv(tables / "rates_by_hypothesis_nfit.csv", index=False)
+    cell_rates = rates_table(dec_main, ["scope"] + CELL + ["truth_class", "procedure"], alpha)
     cell_rates.to_csv(tables / "rates_by_cell.csv", index=False)
-    pooled = rates_table(dec_all, ["task", "truth_class", "procedure"], alpha)
+    pooled = pooled_rates(dec_main, ["scope", "task", "truth_class", "procedure"], seed)
     pooled.to_csv(tables / "rates_pooled.csv", index=False)
-    sweep = threshold_sweep(dec_all, a["thresholds"], alpha)
-    sweep.to_csv(tables / "threshold_sweep.csv", index=False)
+    sweep_cells, sweep_pooled = threshold_sweep(dec_all, a["thresholds"], seed)
+    sweep_cells.to_csv(tables / "threshold_sweep.csv", index=False)
+    sweep_pooled.to_csv(tables / "threshold_sweep_pooled.csv", index=False)
     reg = regressions(dec_k, figdir)
     reg.to_csv(tables / "regression.csv", index=False)
-    paired = paired_tests(dec_all)
+    paired = paired_tests(dec_all, seed)
     paired.to_csv(tables / "paired_tests.csv", index=False)
 
     ev_all = ev[ev.scope == "all"]
-    boot = bootstrap_table(cfg, ev_all, fits)
+    boot = bootstrap_table(cfg, ev_all)
     boot.to_csv(tables / "bootstrap_intervals.csv", index=False)
-    bw = (boot.groupby(["task", "truth_class", "width", "n_fit", "split", "method"])
-          ["width_ci"].median().unstack("method").reset_index()) if len(boot) else boot
+    bw = (boot.groupby(["task", "truth_class", "width", "n_fit", "method"])["width_ci"]
+          .median().unstack("method").reset_index()) if len(boot) else boot
     if len(boot):
         bw["base/iid"] = bw["base"] / bw["iid"]
         bw["twoway/iid"] = bw["twoway"] / bw["iid"]
     bw.to_csv(tables / "bootstrap_widths.csv", index=False)
 
     plot_iia_distributions(ev_all, figdir)
-    plot_sweep(sweep, figdir)
+    plot_sweep(sweep_pooled, figdir)
     plot_bootstrap(boot, figdir)
 
-    summary = write_summary(cfg, units, fits, shuf, excl_nets, null_sizes, pooled, cell_rates,
-                            paired, reg, bw, ev_all, time.perf_counter() - t0)
+    summary = write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline,
+                            pooled, paired, reg, bw, ev_all, time.perf_counter() - t0)
     print(f"analysis written to {out} (summary: {summary})")
     return summary
 
@@ -398,7 +506,7 @@ def _md(df: pd.DataFrame, floatfmt=".3f") -> str:
     if df is None or df.empty:
         return "_(none)_\n"
     cols = list(df.columns)
-    lines = ["| " + " | ".join(cols) + " |", "|" + "---|" * len(cols)]
+    lines = ["| " + " | ".join(str(c) for c in cols) + " |", "|" + "---|" * len(cols)]
     for r in df.itertuples(index=False):
         cells = []
         for v in r:
@@ -410,8 +518,39 @@ def _md(df: pd.DataFrame, floatfmt=".3f") -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_summary(cfg, units, fits, shuf, excl_nets, null_sizes, pooled, cell_rates, paired,
-                  reg, bw, ev_all, seconds) -> Path:
+def _cell_text(r) -> str:
+    if r is None or r["n"] == 0:
+        return ""
+    s = f"{r['certified']}/{r['n']}"
+    if str(r["truth_class"]).startswith("negative"):
+        s += f" (≤{r['upper95_one_sided']:.2f})"
+    return s
+
+
+def headline_table(headline: pd.DataFrame, scope: str, classes) -> str:
+    out = []
+    h = headline[headline.scope == scope]
+    for key, g in h.groupby(HCELL):
+        rows = []
+        for proc in ALL_PROCS:
+            gp = g[g.procedure == proc]
+            if gp.empty or gp["n"].sum() == 0:
+                continue
+            row = {"procedure": proc + (" †" if proc in ORACLE else "")}
+            for cls in classes:
+                r = gp[gp.truth_class == cls]
+                row[cls] = _cell_text(r.iloc[0]) if len(r) else ""
+            rows.append(row)
+        nets = {cls: int(g[g.truth_class == cls].n_networks.max())
+                for cls in classes if (g.truth_class == cls).any()}
+        out.append(f"\n**{key[0]}, hypothesis `{key[1]}`, n_fit = {key[2]}** — networks: "
+                   + ", ".join(f"{k} {v}" for k, v in nets.items()) + "\n\n")
+        out.append(_md(pd.DataFrame(rows)))
+    return "".join(out)
+
+
+def write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline, pooled,
+                  paired, reg, bw, ev_all, seconds) -> Path:
     a = cfg["analysis"]
     c, alpha = a["threshold"], a["alpha"]
     L = [f"# Results: `{cfg['name']}`\n",
@@ -423,86 +562,102 @@ def write_summary(cfg, units, fits, shuf, excl_nets, null_sizes, pooled, cell_ra
          "IIT-trained toward the other algorithm (solves the task); `unknown_standard` = "
          "trained on the task only (truth unknown, descriptive only).\n"]
 
-    L.append("## Exclusions\n")
-    nf = len(fits)
+    if len(incomplete):
+        L.append(f"\n> **WARNING: {len(incomplete)} units had missing fits and were DROPPED** "
+                 "(`--allow-incomplete`; list in `tables/incomplete_units.csv`). Rates below "
+                 "exclude them.\n")
+    L.append("\n## Exclusions\n")
     nc = int((~fits.converged.astype(bool)).sum())
-    ns = len(shuf)
-    nsc = int((~shuf.converged.astype(bool)).sum()) if ns else 0
-    failed = int((excl_nets.failed).sum())
-    L.append(f"- Networks failing their training targets (excluded): {failed} of "
-             f"{int(excl_nets.networks.sum())}.\n- DAS fits not converged (excluded): {nc} of "
-             f"{nf}.\n- Shuffled-null fits not converged (excluded): {nsc} of {ns}.\n")
+    nsc = int((~shuf.converged.astype(bool)).sum()) if len(shuf) else 0
+    L.append(f"- Networks failing their training targets (excluded): "
+             f"{int(excl_nets.failed.sum())} of {int(excl_nets.networks.sum())}.\n"
+             f"- DAS fits not converged (excluded): {nc} of {len(fits)}.\n"
+             f"- Shuffled-null fits not converged (excluded): {nsc} of {len(shuf)}.\n")
     small = null_sizes[(null_sizes.B_fixed < 19) | (null_sizes.B_max < 19)]
     if len(small):
         L.append(f"- **Warning**: {len(small)} calibration nulls have B < 19, so "
-                 f"p = 1/(1+B) > 0.05 and those null-calibrated procedures can never "
+                 "p = 1/(1+B) > 0.05 and those null-calibrated procedures can never "
                  "certify.\n")
+
+    rnd = fits[(fits.truth_class == "negative_random") & (fits.role == "eval")]
+    L.append("\n## Caveats (read before the tables)\n")
+    L.append("- † `P3_null_wrong_algorithm` and `P4_maxT_wrong_algorithm` are **oracle nulls**: "
+             "they calibrate on networks built exactly like the wrong-algorithm negatives they "
+             "are tested on, so their α for those negatives is nominal by construction. Their "
+             "rates are a check of the code, not a finding about the method; an analyst "
+             "cannot build this null without knowing the true alternative.\n")
+    if len(rnd):
+        L.append(f"- Random networks: {rnd.test_pred_constant.mean():.0%} of their DAS fits "
+                 "predict a single class on every test pair; with label-stratified pairs that "
+                 "gives IIA exactly 0.5. α̂ ≈ 0 for random negatives under the threshold "
+                 "procedures is therefore close to automatic and says little about DAS.\n")
+    L.append("- Rates in each table below are over distinct networks (one unit per network per "
+             "cell). Upper bounds in parentheses are one-sided 95% Wilson bounds: with 0 "
+             "certified out of n the bound is about 3/n (n = 6: 0.31; n = 30: 0.08).\n")
+
     L.append("\n## Procedures\n")
     L.append(_md(pd.DataFrame([{"procedure": p, "evaluated on": v[0], "configuration": v[1],
                                 "meaning": v[2]} for p, v in PROC_INFO.items()])))
 
-    L.append(f"\n## Headline: certification rates at c = {c} (scope: all configurations)\n")
-    L.append("Pooled over the design cells of each task. For negatives the rate is the type I "
-             "error α̂ (report the one-sided 95% upper bound, not just the point estimate); for "
-             "positives it is the power π̂. `binom_p` tests H0: α ≤ 0.05 (exact, one-sided).\n")
-    for task, g in pooled.groupby("task"):
-        L.append(f"\n### {task}\n")
-        for cls in CLASSES:
-            h = g[g.truth_class == cls]
-            if h.empty:
-                continue
-            h = h.set_index("procedure").reindex([p for p in ALL_PROCS if p in set(h.procedure)])
-            h = h.reset_index()[["procedure", "n", "certified", "rate", "wilson_lo", "wilson_hi",
-                                 "upper95_one_sided", "binom_p_alpha_le_0.05"]]
-            h = h[h.n > 0]
-            title = {"positive": "power π̂ (positives)",
-                     "negative_random": "type I error α̂ (random negatives)",
-                     "negative_wrong_algorithm": "type I error α̂ (wrong-algorithm negatives)",
-                     "unknown_standard": "certification rate, standard networks "
-                                         "(descriptive; truth unknown)"}[cls]
-            L.append(f"\n**{title}**\n\n")
-            L.append(_md(h.rename(columns={"binom_p_alpha_le_0.05": "binom_p"})))
+    L.append(f"\n## Headline: certified / networks at c = {c}, scope `all` (all layers)\n")
+    L.append("Each table is one cell (task, hypothesis, n_fit) pooled over widths; every "
+             "network appears once. Positives: power; negatives: type I error with the "
+             "one-sided 95% upper bound.\n")
+    L.append(headline_table(headline, "all", CLASSES))
+    L.append(f"\n## Type I error at the IIT site only (scope `site`: layer L* = "
+             f"{cfg['network']['iit_layer']})\n")
+    L.append("Truth is defined at L*. At other layers a wrong-algorithm network can genuinely "
+             "implement the other algorithm, so this is the cleaner false-positive rate.\n")
+    L.append(headline_table(headline, "site", EVAL_CLASSES))
+
+    L.append("\n## Pooled over hypotheses and n_fit (network-cluster bootstrap 95% CI)\n")
+    p = pooled[(pooled.scope == "all")].copy()
+    p["procedure"] = p.procedure + np.where(p.procedure.isin(ORACLE), " †", "")
+    L.append(_md(p[["task", "truth_class", "procedure", "n_networks", "n_units", "certified",
+                    "rate", "cluster_boot_lo", "cluster_boot_hi"]]))
 
     L.append("\n## Mean IIA statistics by truth class (scope: all)\n")
-    cols = ["P1_naive", "P2_heldout", "F_insample_fixed", "F_heldout_fixed", "P4_split"]
-    m = ev_all.groupby(["task", "truth_class"])[cols].mean().reset_index()
+    m = ev_all.groupby(["task", "truth_class"])[THRESHOLD_PROCS].mean().reset_index()
     L.append(_md(m))
-    if "label_agreement" in ev_all:
-        w = ev_all[ev_all.truth_class == "negative_wrong_algorithm"]
-        if len(w):
-            L.append(f"\nWrong-algorithm negatives: mean agreement between the hypothesis's and "
-                     f"the trained algorithm's counterfactual labels on the test pairs = "
-                     f"{w.label_agreement.mean():.3f} (range {w.label_agreement.min():.3f}–"
-                     f"{w.label_agreement.max():.3f}).\n")
+    w = ev_all[ev_all.truth_class == "negative_wrong_algorithm"]
+    if len(w):
+        L.append(f"\nWrong-algorithm negatives: mean agreement between the hypothesis's and "
+                 f"the trained algorithm's counterfactual labels on the test pairs = "
+                 f"{w.label_agreement.mean():.3f} (range {w.label_agreement.min():.3f}–"
+                 f"{w.label_agreement.max():.3f}).\n")
 
-    L.append("\n## Per-cell rates\n\nSee `tables/rates_by_cell.csv` (Wilson intervals, one-sided "
-             "upper bounds, exact binomial p and Holm-adjusted p across cells within each "
-             "procedure and negative type).\n")
-    sig = cell_rates[(cell_rates.holm_p <= 0.05)]
-    L.append(f"Cells where H0: α ≤ 0.05 is rejected after Holm: {len(sig)}.\n")
+    sig = headline[(headline.holm_p <= 0.05)]
+    L.append(f"\nCells (task, hypothesis, n_fit) where H0: α ≤ 0.05 is rejected after Holm: "
+             f"{len(sig)}.\n")
     if len(sig):
-        L.append(_md(sig[CELL + ["truth_class", "procedure", "n", "certified", "rate",
-                                 "holm_p"]]))
+        L.append(_md(sig[["scope"] + HCELL + ["truth_class", "procedure", "n", "certified",
+                                              "holm_p"]]))
+    L.append("\nPer (task, hypothesis, width, n_fit) cell: `tables/rates_by_cell.csv`.\n")
 
-    L.append("\n## Paired comparisons of procedures (scope: all)\n")
+    L.append("\n## Paired comparisons of procedures (scope: all, one row per network)\n")
+    L.append("Primary: pairwise exact McNemar tests, Holm within each cell "
+             "(`tables/paired_tests.csv`). Secondary: Cochran's Q over the five threshold "
+             "procedures, permutation p-value.\n")
     if len(paired):
-        q = paired.drop_duplicates(["task", "truth_class"])[
-            ["task", "truth_class", "n_units", "cochran_q", "cochran_p"]]
+        q = paired.drop_duplicates(HCELL + ["truth_class"])[
+            HCELL + ["truth_class", "n_networks", "cochran_q_primary", "cochran_perm_p"]]
         L.append(_md(q))
-        L.append("\nPairwise exact McNemar tests with Holm adjustment are in "
-                 "`tables/paired_tests.csv`.\n")
+        sigp = paired[paired.mcnemar_p_holm <= 0.05]
+        L.append(f"\nMcNemar pairs significant after Holm: {len(sigp)} of {len(paired)}.\n")
     else:
         L.append("_(not enough units)_\n")
 
     L.append("\n## Logistic regression of the decision on design covariates\n")
     L.append("Rows are (unit, k) with scope `k=K`; covariates log2 width, k/width, log n_fit "
-             "(constant ones dropped). MLE with cluster-robust SEs by network, Firth when "
-             "separated. Full table: `tables/regression.csv`.\n")
+             "(constant ones dropped). MLE with cluster-robust SEs by network; Firth with "
+             "model-based SEs when separated. Full table: `tables/regression.csv`.\n")
     if len(reg):
-        L.append(_md(reg[["task", "truth_class", "procedure", "n", "events", "method"]
-                         + [c_ for c_ in reg.columns if c_.startswith("b_")]]))
+        L.append(_md(reg[["task", "truth_class", "procedure", "n", "n_networks", "events",
+                          "method"] + [c_ for c_ in reg.columns if c_.startswith("b_")]]))
 
-    L.append("\n## Bootstrap interval widths (fixed config; median 95% width)\n")
+    L.append("\n## Bootstrap interval widths (held-out fixed-config IIA; median 95% width)\n")
+    L.append("`base` (base-input cluster) is the recommended interval; `twoway` is about 2× too "
+             "wide in this design (see docs/code/procedures_and_statistics.md).\n")
     L.append(_md(bw))
     L.append("\nFigures: `figures/iia_by_class_*.png`, `figures/threshold_sweep_*.png`, "
              "`figures/binned_residuals_*.png`, `figures/bootstrap_widths.png`.\n")

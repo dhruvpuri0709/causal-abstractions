@@ -4,6 +4,9 @@ A *configuration* is (layer, k, rotation seed).  A *scope* is the set of configu
 procedure may look at:
 
 * ``all``:  every layer x every k x every seed (the main analysis);
+* ``site``: only the IIT layer L*, every k x every seed.  The truth of a negative is defined at
+  L*; at other layers a wrong-algorithm network can genuinely implement the other algorithm, so
+  alpha restricted to L* is the cleaner false-positive rate;
 * ``k=K``:  every layer x every seed at subspace size K (used for the regression on k/width).
 
 The pre-registered ("fixed") configuration of a scope is (L*, k*, seed 0) where L* is the IIT
@@ -59,8 +62,9 @@ PROC_INFO = {
 CELL = ["task", "hypothesis", "width", "n_fit"]
 
 
-def scopes_for(ks: list[int]) -> list[tuple[str, int | None]]:
-    return [("all", None)] + [(f"k={k}", k) for k in ks]
+def scopes_for(ks: list[int]) -> list[tuple[str, int | None, bool]]:
+    """(name, k or None, restricted to the IIT layer?)"""
+    return [("all", None, False), ("site", None, True)] + [(f"k={k}", k, False) for k in ks]
 
 
 def unit_statistics(fits: pd.DataFrame, units: pd.DataFrame, ks_by_width: dict) -> pd.DataFrame:
@@ -76,8 +80,10 @@ def unit_statistics(fits: pd.DataFrame, units: pd.DataFrame, ks_by_width: dict) 
     rows = []
     for u in units.itertuples(index=False):
         f = by_unit.get(u.unit_id, conv.iloc[:0])
-        for scope, k in scopes_for(ks_by_width[u.width]):
+        for scope, k, site in scopes_for(ks_by_width[u.width]):
             fs = f if k is None else f[f["k"] == k]
+            if site:
+                fs = fs[fs["layer"] == u.fixed_layer]
             k_fixed = u.fixed_k if k is None else k
             fx = fs[(fs["layer"] == u.fixed_layer) & (fs["k"] == k_fixed)
                     & (fs["seed_index"] == 0)]
@@ -139,7 +145,7 @@ def add_null_pvalues(stats: pd.DataFrame, units: pd.DataFrame,
                 null = g[statcol].dropna().to_numpy()
                 ev.at[i, proc] = perm_pvalue(r[statcol], null)
                 ev.at[i, f"B_{proc}"] = len(null)
-        if r.scope_k == r.fixed_k and r.scope in ("all", f"k={r.fixed_k}"):
+        if r.scope_k == r.fixed_k:  # the shuffled null exists only at (L*, k*)
             null = shuf.get(r.unit_id, np.array([]))
             ev.at[i, "P3_null_shuffled"] = perm_pvalue(r["F_heldout_fixed"], null)
             ev.at[i, "B_P3_null_shuffled"] = len(null)

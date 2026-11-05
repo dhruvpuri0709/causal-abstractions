@@ -144,7 +144,7 @@ def fit_logistic(df: pd.DataFrame, ycol: str, xcols: list[str], group: str) -> d
         separated = bad
     if separated:
         f = firth_logit(X, y)
-        res.update(method="firth", params=dict(zip(names, f["params"])),
+        res.update(method="firth (model-based SE)", params=dict(zip(names, f["params"])),
                    bse=dict(zip(names, f["bse"])), converged=f["converged"],
                    fitted=f["fitted"])
     else:
@@ -197,6 +197,46 @@ def cochran_q(decisions: np.ndarray) -> tuple[float, float]:
         return float("nan"), float("nan")
     q = (k - 1) * (k * (col**2).sum() - row.sum() ** 2) / denom
     return float(q), float(sps.chi2.sf(q, k - 1))
+
+
+def cochran_q_permutation(decisions: np.ndarray, n_perm: int = 10000,
+                          rng: np.random.Generator | None = None) -> tuple[float, float]:
+    """Cochran's Q with a permutation p-value (no chi-square approximation).
+
+    Under H0 (all procedures have the same certification probability for a unit) the k
+    decisions of a unit are exchangeable, so each row is permuted independently; Q depends on
+    the column sums only.  p = (1 + #{Q* >= Q}) / (1 + n_perm).
+    """
+    x = np.asarray(decisions, dtype=float)
+    q, _ = cochran_q(x)
+    if np.isnan(q):
+        return q, float("nan")
+    rng = rng or np.random.default_rng(0)
+    n, k = x.shape
+    row = x.sum(1)
+    denom = k * row.sum() - (row**2).sum()
+    count = 0
+    for start in range(0, n_perm, 1000):
+        m = min(1000, n_perm - start)
+        order = np.argsort(rng.random((m, n, k)), axis=2)
+        xp = np.take_along_axis(np.broadcast_to(x, (m, n, k)), order, axis=2)
+        col = xp.sum(1)
+        qs = (k - 1) * (k * (col**2).sum(1) - row.sum() ** 2) / denom
+        count += int(np.sum(qs >= q - 1e-12))
+    return q, (1 + count) / (1 + n_perm)
+
+
+def cluster_bootstrap_rate(clusters, y, B: int = 2000, rng=None) -> tuple[float, float]:
+    """95% percentile interval for a pooled rate, resampling clusters (networks) with
+    replacement and keeping all of a cluster's rows together."""
+    df = pd.DataFrame({"c": np.asarray(clusters), "y": np.asarray(y, dtype=float)})
+    g = df.groupby("c")["y"].agg(["sum", "count"])
+    if len(g) == 0:
+        return float("nan"), float("nan")
+    rng = rng or np.random.default_rng(0)
+    idx = rng.integers(len(g), size=(B, len(g)))
+    rates = g["sum"].to_numpy()[idx].sum(1) / g["count"].to_numpy()[idx].sum(1)
+    return float(np.quantile(rates, 0.025)), float(np.quantile(rates, 0.975))
 
 
 def mcnemar_exact(a: np.ndarray, b: np.ndarray) -> tuple[int, int, float]:
