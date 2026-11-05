@@ -50,11 +50,15 @@ Each item: what `docs/proposal.tex` says, what the code does, and why.
 
 10. **Bootstrap: three schemes, not one.** Proposal: base-input cluster bootstrap. Code: iid,
     base-cluster and two-way base × source (Owen 2007 pigeonhole), with a width comparison
-    table, because pairs share source inputs as well as base inputs.
+    table, because pairs share source inputs as well as base inputs. A Monte Carlo check shows
+    the base-cluster interval is right and the two-way one about 2× too wide in our design, so
+    the base-cluster bootstrap (the proposal's choice) stays primary.
 
 11. **Statistics added beyond the proposal.** One-sided upper Wilson bounds for α; Holm across
     cells within each procedure × negative type; Cochran's Q before pairwise McNemar (with
-    Holm); cluster-robust SEs by network in the logistic regression. Mixed-effects logistic is
+    Holm); Cochran's Q with a permutation p-value (McNemar is primary); cluster-robust SEs by
+    network in the logistic regression (Firth fallback has model-based SEs, flagged in the
+    output). Mixed-effects logistic is
     fitted with statsmodels' variational-Bayes `BinomialBayesMixedGLM` (not a frequentist
     GLMM). Not implemented: likelihood-ratio tests for interactions.
 
@@ -75,7 +79,35 @@ Each item: what `docs/proposal.tex` says, what the code does, and why.
     and pair sampler differ from theirs. Widths: pilot 16/32 (HE) and 24 (DL); full 16/32/64 and
     24/48/96.
 
-15. **Reproduction result differs for task-trained networks.** The proposal plans to reproduce
-    near-perfect IIA on a trained network. IIT-trained networks reproduce Table 1 closely, but
-    our task-trained networks reach only 0.67–0.94 best in-sample IIA at layer 0, k = 8
-    (Table 1: 1.00), see [running.md](running.md). Not resolved.
+15. **Task-trained networks vary, and that explains the "non-reproduction".** The proposal
+    plans to reproduce near-perfect IIA on a trained network. IIT-trained networks reproduce
+    Table 1 closely. Our task-trained networks reach 0.67–0.94 best in-sample IIA at layer 0,
+    k = 8 (Table 1: 1.00). This matches Sutter et al.'s published results for the same setting
+    (`external/non-linear-representation-dilemma/Results.zip`,
+    `Standard_DAS/Rotation/FullyTrained/Both_Equality_Relations/results.json`, which we checked).
+    There, 10 task-trained networks at the paper's Layer 1 give 0.719–0.975 (mean 0.842) at
+    k = 8 and 0.560–0.919 at k = 1. The object range is not the cause: Geiger et al.'s own
+    `InterchangeInterventions/utils.py` (`randvec`) also uses [-0.5, 0.5], and the review found
+    similar spreads with the tutorial's [-1, 1] rounded inputs, one network reaching 0.993. Table 1
+    reports the best of 3 rotation seeds on a single network. A well-aligned network is one draw
+    from a wide distribution over training seeds, not the typical case. See
+    [running.md](running.md).
+
+16. **Units are not independent; pooling is done accordingly.** A network yields one unit per
+    (hypothesis, n_fit). The proposal's per-cell binomial intervals and tests are computed with
+    one unit per network (cells (task, hypothesis, n_fit) and (task, hypothesis, width, n_fit)).
+    Summaries over hypotheses or n_fit use a cluster bootstrap over networks.
+
+17. **α̂ at the IIT site.** Truth is defined at L*, but max-over-layers procedures can find the
+    other algorithm genuinely implemented at another layer. α̂ is reported both over all
+    layers (scope `all`) and restricted to L* (scope `site`).
+
+18. **Oracle and near-automatic negatives.** The wrong-algorithm null is an oracle (exchangeable
+    with the negatives it is tested on), and random networks mostly predict a constant class
+    (IIA exactly 0.5). Neither is presented as a finding about the method; see
+    [procedures_and_statistics.md](procedures_and_statistics.md).
+
+19. **Reproducibility guards (not in the proposal).** Every stored network, pair file and fit
+    carries a fingerprint of the settings that produced it; stale outputs are refused
+    (`--force` rebuilds them); `analyze` reads only the configured grid and refuses incomplete
+    units unless `--allow-incomplete`.

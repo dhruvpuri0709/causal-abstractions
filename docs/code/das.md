@@ -51,7 +51,7 @@ Hyperparameters live under `das.fit` in the config; `reproduce.yaml` uses the sa
 | Its known alignment (neurons 0–3 = WX, 4–7 = YZ of layer 0) gives IIA = 1, with R = None and R = I | `test_handcrafted_neuron_alignment_iia_is_one`; also section 1 of `cas reproduce` | IIA = 1.0000 |
 | Swapping the two neuron blocks breaks it | `test_handcrafted_wrong_alignment_is_not_perfect` | IIA < 0.9 |
 | Interchange algebra (no mask = identity; the right rotated dims come from the right source; R orthogonal) | `test_interchange_algebra` | exact to 1e-5 |
-| Tiny random network: DAS IIA near chance | `test_random_network_iia_near_chance` | 0.4 < IIA < 0.6 |
+| Random network with non-constant outputs: held-out DAS IIA near chance | `test_random_network_iia_near_chance` | predictions not constant; 0.4 < IIA < 0.6 |
 | Counterfactual labels on hand-worked examples | `tests/test_tasks.py` | pass |
 | Same predictions as pyvene's `RotatedSpaceIntervention` with our fitted R | `tests/test_pyvene_crosscheck.py` (`-m slow`) | see [running.md](running.md) |
 

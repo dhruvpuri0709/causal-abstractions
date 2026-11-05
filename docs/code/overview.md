@@ -16,6 +16,7 @@ cas train ──► results/<name>/networks/<net_id>.pt|.json
    │            metadata records task accuracy, neuron-aligned IIA, pass/fail
    ▼
 cas fit   ──► results/<name>/fits/<unit_id>/
+   │            unit.json          the unit's settings fingerprint
    │            pairs.npz          fit/select/test pools of base and source inputs, pair ids,
    │                               counterfactual labels under every algorithm of the task
    │            L{l}_k{k}_s{s}.npz one DAS fit: per-pair predictions + correctness on each split,
@@ -27,12 +28,17 @@ cas analyze ► results/<name>/tables/*.csv, figures/*.png, summary.md
                 unit_statistics.csv one row per (evaluation unit, scope): each procedure's statistic
                                     and p-values, null sizes, covariates
                 decisions.csv       one row per (unit, scope, procedure): statistic, p, decision
-                rates_*.csv         α̂ / π̂ with Wilson intervals, upper bounds, binomial tests, Holm
+                rates_by_hypothesis_nfit.csv, rates_by_cell.csv
+                                    α̂ / π̂ per cell, one row per network: Wilson intervals, upper
+                                    bounds, binomial tests, Holm
+                rates_pooled.csv    pooled over cells, network-cluster bootstrap intervals
                 threshold_sweep.csv, regression.csv, paired_tests.csv, bootstrap_*.csv,
                 excluded_*.csv, null_sizes.csv, calibration_statistics.csv
 ```
 
-An **analysis unit** is (network, hypothesised algorithm, number of fitting pairs). Its truth
+An **analysis unit** is (network, hypothesised algorithm, number of fitting pairs). A network
+therefore has several units; rates and tests are computed within cells where each network
+appears once (see [procedures_and_statistics.md](procedures_and_statistics.md#independence-which-units-can-be-pooled)). Its truth
 class is fixed by construction: `positive`, `negative_random`, `negative_wrong_algorithm` or
 `unknown_standard` (see [tasks_and_networks.md](tasks_and_networks.md)). Evaluation units
 (`role = eval`) get decisions; calibration units (`role = cal`, different networks, different
@@ -61,6 +67,7 @@ analyze` in under a minute. Nothing in `analyze` trains anything.
 | `src/cas/reproduce.py` | `cas reproduce`: handcrafted check, Table 1 and §4.4 analogues, timing |
 | `src/cas/cli.py` | The `cas` command |
 | `configs/` | `pilot.yaml`, `full.yaml`, `reproduce.yaml` |
+| `scripts/bootstrap_monte_carlo.py` | Monte Carlo check of the bootstrap intervals |
 | `tests/` | Fast tests (`uv run pytest`), including an end-to-end smoke run |
 
 ## Where to check things
@@ -70,3 +77,5 @@ analyze` in under a minute. Nothing in `analyze` trains anything.
 * Which network is a positive or negative for which hypothesis: `Config.units` and
   `tests/test_config.py`.
 * Decision rules: `procedures.py` docstring and `tests/test_procedures.py`.
+* Stale-output guards and determinism: `pipeline.py` docstring and
+  `tests/test_pipeline_smoke.py`.

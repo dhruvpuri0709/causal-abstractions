@@ -17,16 +17,25 @@ therefore 0.5 both for a constant guess and for "ignore the intervention".
 ## Configurations and scopes
 
 A configuration is (layer l, subspace size k, rotation seed s) with l ∈ `das.layers`,
-k ∈ round(`k_fracs` × width) ∪ {k*}, s < `das.seeds`. The pre-registered configuration is
+k ∈ round(`k_fracs` × width) ∪ {k*}, s < `das.seeds`. The pre-registered configuration c₀ is
 (L*, k*, seed 0): the IIT site and size; random and standard networks of the same width use the
 same nominal values. A *scope* is the set of configurations a procedure may use:
-`all` (main analysis), or `k=K` (all layers and seeds at size K; fixed config (L*, K, 0)), used
-for the regression on k/width.
+
+* `all`: every layer, k and seed (main analysis);
+* `site`: only layer L* (every k and seed). Truth is defined at L*, and at other layers a
+  wrong-algorithm network can genuinely implement the other algorithm (example in
+  [tasks_and_networks.md](tasks_and_networks.md)), so α̂ in scope `site` is the cleaner
+  false-positive rate;
+* `k=K`: every layer and seed at size K, fixed config (L*, K, 0); used for the regression on
+  k/width.
+
+Only fits in the configured grid are read; `analyze` refuses to run if any unit is missing a fit
+(`--allow-incomplete` drops such units and flags them at the top of `summary.md`).
 
 ## Procedures (proposal §4 (1)–(4) plus factorial cells)
 
-With IIA_split(c) the IIA of configuration c on a split, C the scope's converged configurations,
-c₀ the fixed configuration and threshold c (default 0.9):
+With IIA_split(c) the IIA of configuration c on a split, C the scope's converged configurations
+and threshold c (default 0.9):
 
 | Name | Statistic T | Certify if | Proposal |
 |---|---|---|---|
@@ -39,7 +48,7 @@ c₀ the fixed configuration and threshold c (default 0.9):
 | `P4_maxT_<n>` | max_{c∈C} IIA_test(c) | p̂ ≤ α | (4) alternative: null of the max (Westfall–Young) |
 
 The 2 × 2 factorial {in-sample, held-out} × {max over configs, fixed} is P1, P2,
-F_insample_fixed, F_heldout_fixed, so the effect of held-out evaluation and the effect of
+F_insample_fixed and F_heldout_fixed, so the effect of held-out evaluation and the effect of
 selection can be separated. P3 uses the F_heldout_fixed statistic with a calibrated critical
 value instead of c; P4_maxT uses the P2 statistic with a calibrated critical value.
 
@@ -57,9 +66,23 @@ reported separately (`<n>`):
   test labels; B = `null.shuffle_B` refits per unit.
 
 Calibration networks are different networks (own ids and training seeds) from the evaluation
-networks, so no test is evaluated on data that calibrated it. Under exchangeability of a
-negative with its null type, P3/P4_maxT control α at the nominal level for that negative type;
-they are not guaranteed to for the other type.
+networks, so no test is evaluated on data that calibrated it.
+
+### Two caveats on reading the results
+
+1. **The wrong-algorithm null is an oracle.** `P3_null_wrong_algorithm` and
+   `P4_maxT_wrong_algorithm` calibrate on networks built exactly like the wrong-algorithm
+   negatives they are then tested on. The two are exchangeable, so their α for those negatives is
+   at the nominal level *by construction*. Their low false-positive rates are a correctness check
+   of the code, not a finding about the method: in practice an analyst does not know the true
+   alternative algorithm and cannot build this null. They are marked † in `summary.md`. The
+   `random` and `shuffled` nulls are the ones an analyst could actually build.
+2. **Random negatives are nearly automatic.** Most frozen random networks (PyTorch default init)
+   predict one constant class whatever the intervention. With label-stratified pairs that gives
+   IIA of exactly 0.5. `summary.md` reports the share of random-network fits whose test
+   predictions are constant (61% in the pilot, as the review also found). So α̂ ≈ 0 for random negatives under the
+   threshold procedures says little about DAS. Only wrong-algorithm negatives test the
+   procedures seriously.
 
 **Exclusions.** Non-converged fits (see [das.md](das.md)) are dropped before anything else. A
 max statistic uses the remaining configurations of the scope; a fixed-config statistic is
@@ -68,22 +91,41 @@ Networks failing their training targets are excluded entirely. Counts:
 `tables/excluded_networks.csv`, `tables/excluded_fits.csv`, and the top of `summary.md`.
 Ties in argmax go to the first configuration in (layer, k, seed) order.
 
-## Rates per design cell
+## Independence: which units can be pooled
 
-A design cell is (task, hypothesis, width, n_fit). For each cell, truth class and procedure
-(`tables/rates_by_cell.csv`; pooled over cells per task in `rates_pooled.csv`):
+A network yields one analysis unit per (hypothesis, n_fit): each distributive-law random network
+gives two units (one per hypothesis), and in the full design every network appears at three
+n_fit values. These units are not independent. So:
 
-* α̂ (negatives) or π̂ (positives) = certified / n, with the 95% Wilson score interval
+* Rates, Wilson intervals, binomial tests and paired tests are computed only within groups where
+  **each network appears once**: the headline cell (task, hypothesis, n_fit), pooled over widths
+  (`tables/rates_by_hypothesis_nfit.csv`, the tables in `summary.md`), and the design cell
+  (task, hypothesis, width, n_fit) (`tables/rates_by_cell.csv`). `analyze` raises an error if a
+  rate group contains a network twice.
+* Summaries pooled over hypotheses and n_fit (`tables/rates_pooled.csv`,
+  `threshold_sweep_pooled.csv`, the sweep figures) report the rate with a 95% **cluster
+  bootstrap over networks** (`stats.cluster_bootstrap_rate`: resample networks with
+  replacement, keep all of a network's units together), never a binomial interval.
+* The regression rows (unit × k) contain each network several times; the MLE uses
+  cluster-robust standard errors by network, and the mixed model has a random intercept per
+  network.
+
+## Rates per cell
+
+For each cell, truth class and procedure:
+
+* α̂ (negatives) or π̂ (positives) = certified / n networks, with the 95% Wilson score interval
   p̃ ± z√(p̂(1−p̂)/n + z²/4n²)/(1 + z²/n), p̃ = (p̂ + z²/2n)/(1 + z²/n), z = 1.96;
-* the one-sided 95% upper Wilson bound (z = 1.645): report this for α. Failing to reject
-  H0: α ≤ 0.05 is not evidence that α is controlled;
+* the one-sided 95% upper Wilson bound (z = 1.645). Report this for α: failing to reject
+  H0: α ≤ 0.05 is not evidence that α is controlled. With 0 certified out of n the bound is
+  roughly 3/n (n = 6: 0.31; n = 12: 0.18; n = 30: 0.08);
 * for negatives, the exact one-sided binomial test of H0: α ≤ 0.05, p = P(X ≥ x | n, 0.05), and
-  Holm's step-down adjustment across cells, separately for each procedure × negative type;
-* `threshold_sweep.csv` and `figures/threshold_sweep_*.png`: rates for c ∈
-  `analysis.thresholds` (p-value procedures don't depend on c).
+  Holm's step-down adjustment across the cells of the same (scope, procedure, truth class);
+* `threshold_sweep.csv` (per headline cell) and `threshold_sweep_pooled.csv`: rates for
+  c ∈ `analysis.thresholds` (p-value procedures don't depend on c).
 
-Standard networks (`unknown_standard`) appear in these tables only as descriptive certification
-rates; they never enter α̂, π̂, tests or regressions.
+Standard networks (`unknown_standard`) appear only as descriptive certification rates; they
+never enter α̂, π̂, tests or regressions.
 
 ## Across cells: logistic regression (`regression.csv`)
 
@@ -93,43 +135,71 @@ truth class (positive, negative_random, negative_wrong_algorithm separately) × 
 logit P(certify) = β₀ + β₁ log₂ width + β₂ k/width + β₃ log n_fit
 
 (covariates that are constant in the data are dropped, e.g. log n_fit in the pilot). Fitted by
-maximum likelihood with cluster-robust (by network) standard errors; if the outcome is constant,
-statsmodels reports (quasi-)separation or non-convergence, or a fitted |linear predictor| > 15,
-Firth's penalized likelihood is used instead (`stats.firth_logit`: Newton steps on the modified
-score X'(y − p + h(½ − p)) with step halving; Wald SEs from (X'WX)⁻¹; tested against the
-closed form logit((x+½)/(n+1)) for an intercept-only model and against MLE on large data). The
-`method` column says which. A random-intercept-per-network model (statsmodels
-`BinomialBayesMixedGLM`, variational Bayes) is fitted alongside when there are both events and
-non-events (`mixed_b_*`, `mixed_log_sd_net`). **Binned residuals** (mean residual vs mean fitted
-probability in 10 quantile bins, ±2 SE band) are in `figures/binned_residuals_<task>.png`.
+maximum likelihood with cluster-robust (by network) standard errors. If the outcome is constant,
+statsmodels reports (quasi-)separation or non-convergence, or a fitted |linear predictor| is
+above 15, Firth's penalized likelihood is used instead (`stats.firth_logit`). This takes Newton
+steps on the modified score X'(y − p + h(½ − p)) with step halving, and it is tested against the
+closed form logit((x+½)/(n+1)) for an intercept-only model and against MLE on large data. Its
+standard errors are **model-based** (Wald, from (X'WX)⁻¹), not cluster-robust; the `method`
+column says `firth (model-based SE)` when this happens. A random-intercept-per-network model
+(statsmodels `BinomialBayesMixedGLM`, variational Bayes) is fitted alongside when there are both
+events and non-events (`mixed_b_*`, `mixed_log_sd_net`). **Binned residuals** (mean residual vs
+mean fitted probability in 10 quantile bins, ±2 SE band) are in
+`figures/binned_residuals_<task>.png`.
 
 Not implemented: likelihood-ratio tests for interactions (proposal §4); profile-likelihood CIs
 for Firth.
 
 ## Paired comparisons (`paired_tests.csv`)
 
-All procedures are applied to the same units, so decisions are paired. Per task × truth class,
-on units with a decision under every procedure available for that task: Cochran's Q omnibus
-test, then pairwise exact McNemar tests (two-sided binomial on discordant pairs) with Holm
-adjustment.
+All procedures are applied to the same units, so decisions are paired. Within each headline
+cell (task, hypothesis, n_fit) × truth class, with one row per network and only the networks
+that have a decision under every procedure available in that cell:
+
+* **primary:** pairwise exact McNemar tests (two-sided binomial on the discordant pairs), Holm
+  across all pairs of the cell;
+* **secondary:** Cochran's Q over the five threshold procedures (P1, P2, F_insample_fixed,
+  F_heldout_fixed, P4_split) with a **permutation p-value** (`stats.cochran_q_permutation`:
+  each network's decisions are permuted across procedures, 10 000 permutations). This avoids
+  the χ² approximation, which is poor with ~6–12 networks.
 
 ## Bootstrap intervals for IIA (`bootstrap_intervals.csv`, `bootstrap_widths.csv`)
 
-For each evaluation unit, the fixed-config IIA on the fit split and on the test split, with
-B = `analysis.bootstrap_B` replicates, 95% percentile intervals under three schemes
-(`bootstrap.py`; IIA* = Σ w c / Σ w):
+For each evaluation unit, the held-out (test-split) IIA at c₀, with B = `analysis.bootstrap_B`
+replicates, 95% percentile intervals under three schemes (`bootstrap.py`;
+IIA* = Σ w c / Σ w):
 
 * `iid`: multinomial resampling of pairs (ignores shared inputs);
-* `base`: base inputs resampled; pair weight = its base's count (one-way cluster bootstrap);
+* `base`: base inputs resampled; pair weight = its base's count (one-way cluster bootstrap).
+  **Recommended primary interval**;
 * `twoway`: base and source inputs resampled independently; pair weight = (base count) ×
-  (product of its sources' counts), the pigeonhole product bootstrap for crossed factors
-  (Owen 2007, extended to two sources by multiplying), which is mildly conservative.
+  (product of the counts of its distinct sources). This is the pigeonhole product bootstrap for
+  crossed factors (Owen 2007), extended to two sources.
 
-`bootstrap_widths.csv` gives the median interval width per scheme and the ratios base/iid and
-twoway/iid by task, class, width and n_fit (the planned preliminary result).
+Fit-split intervals are not computed. R was trained on those very pairs, so resampling them
+does not reflect refitting.
 
-**Caveat (measured in the pilot).** With each input used in at most 2 pairs, the two-way
-interval is about twice the iid width even for independent pairs: the product weights have
-E[w²] = 4 (one source) or 8 (two sources) against 2 for iid weights, so the product bootstrap
-over-counts the pair-level variance when clusters are this small. Treat it as a conservative
-bound, not as evidence of crossed dependence (see [running.md](running.md)).
+**Evidence (Monte Carlo).** `scripts/bootstrap_monte_carlo.py` fixes a fitted R on four units
+whose IIA is far from 0.5 and 1: two distributive-law wrong-algorithm units and a task-trained
+HE network at two sites. It then draws 300 fresh test splits of 1024 pairs each and compares the
+SD of IIA across splits with the bootstrap SDs from one split:
+
+| unit | mean IIA | Monte Carlo SD | iid | base | two-way |
+|---|---|---|---|---|---|
+| DL IIT-AOA net 1 vs And-Or, L1 k6 | 0.785 | 0.0128 | 0.0127 | 0.0139 | 0.0269 |
+| DL IIT-AOA net 2 vs And-Or, L1 k6 | 0.790 | 0.0125 | 0.0129 | 0.0138 | 0.0262 |
+| HE standard net, L0 k4 | 0.721 | 0.0133 | 0.0138 | 0.0145 | 0.0295 |
+| HE standard net, L1 k8 | 0.617 | 0.0160 | 0.0152 | 0.0158 | 0.0310 |
+
+The independent review found the same with its own units: Monte Carlo SD 0.011–0.014;
+iid/base 0.013–0.016; two-way 0.028–0.031. So with inputs used in at most 2 pairs:
+
+* the base-cluster bootstrap is about right, slightly conservative;
+* there is little dependence to correct for, so iid is close too;
+* the two-way bootstrap is about **2× too wide**.
+
+The weights explain this. For independent pairs, the variance of a weighted mean scales with
+E[w²]. That is 2 for iid weights. For the product weights it is 4 with one source and 8 with two
+(1/3 of pairs). The mix gives a Var(w) ratio of about 4.33 and a width ratio of about 2.1: the
+product scheme counts each pair's own noise once per factor. Two-way intervals are reported but
+should not be used for inference in this design.

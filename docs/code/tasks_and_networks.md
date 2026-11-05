@@ -69,11 +69,17 @@ at that site, and solves the task. Two caveats:
 
 * A wrong-algorithm network might still implement the hypothesis partially, or at another layer.
   We record, per unit, the agreement between the hypothesised and the trained algorithm's
-  counterfactual labels on the test pairs (`label_agreement` in `unit_statistics.csv`); it is
-  about 0.66 for the distributive law because the two algorithms agree on many interventions.
-  Max-over-layers procedures can certify a wrong algorithm at a layer other than L*; we count
-  that as a false positive (the truth definition is at L*), and the selected configuration is
-  recorded (`P1_config`, `P2_config`, `P4_config`).
+  counterfactual labels on the test pairs (`label_agreement` in `unit_statistics.csv`); in the
+  pilot it was 0.639 on average (range 0.61–0.68) for the distributive law, because the two
+  algorithms agree on many interventions.
+  At layers other than L* a wrong-algorithm network can be a *true* abstraction of the other
+  algorithm. Example: if layer 0 still keeps the three object pairs in separate subspaces, then
+  interchanging the subspaces of pairs 0 and 2 together implements And-Or's V2 = e0 ∨ e2 (and
+  the subspace of pair 1 implements V1 = e1), whatever the network was IIT-trained to do at L*.
+  Max-over-layers procedures can therefore certify the "wrong" algorithm correctly at another
+  layer. The analysis reports both scope `all` (counted as a false positive, since truth is
+  defined at L*) and scope `site` (procedures restricted to L*), which is the cleaner type I
+  error. The selected configuration is recorded (`P1_config`, `P2_config`, `P4_config`).
 * For positives, DAS searches with a random-orthogonal starting rotation, so finding the planted
   neuron basis is not guaranteed; low power at some (layer, k) is a property of DAS, not of the
   ground truth.
