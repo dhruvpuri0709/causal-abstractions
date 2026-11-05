@@ -165,10 +165,11 @@ def reproduce(config_path: str, device: str = "cpu", widths: str | None = None) 
         report.append(_table(vrows, ["network", "train_steps", "task_acc", "best_in_sample",
                                      "held_out_of_best"]))
         report.append(f"\nRange of best in-sample IIA: {min(vals):.3f}-{max(vals):.3f}. "
-                      "Task-trained networks in this setup do **not** reliably reach the "
-                      "near-perfect IIA of Table 1; training 20 000 steps (to 0.9998 accuracy) "
-                      "or fitting DAS on 65 536 pairs did not change this in our checks "
-                      "(see docs/code/running.md). IIT-trained networks do.\n")
+                      "Task-trained networks vary widely across training seeds; Table 1's "
+                      "1.00 is the best of 3 rotation seeds on one network. Sutter et al.'s "
+                      "published results show the same spread (0.719-0.975 at k = 8 over 10 "
+                      "networks); see docs/code/running.md. IIT-trained networks reliably reach "
+                      "it.\n")
 
     # 3. random networks
     report.append("\n## 3. Frozen random networks (§4.4 analogue)\n\n"
