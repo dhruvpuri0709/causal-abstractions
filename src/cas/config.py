@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -53,6 +54,13 @@ def _merge(base: dict, over: dict) -> dict:
         else:
             out[key] = copy.deepcopy(val)
     return out
+
+
+def fingerprint(obj) -> str:
+    """Short SHA-256 of a JSON-serialisable object (sorted keys): identifies the settings that
+    produced a stored network, pair file or fit."""
+    blob = json.dumps(obj, sort_keys=True, default=str).encode()
+    return hashlib.sha256(blob).hexdigest()[:16]
 
 
 def derive_seed(*parts) -> int:
@@ -146,6 +154,28 @@ class Config(dict):
     def das_configs(self, width: int) -> list[tuple[int, int, int]]:
         return [(layer, k, s) for layer in self["das"]["layers"] for k in self.ks(width)
                 for s in range(self["das"]["seeds"])]
+
+    # ---- fingerprints ----------------------------------------------------------------------
+    def network_fingerprint(self, spec: "NetworkSpec") -> str:
+        """Everything that determines a network's weights."""
+        return fingerprint({"seed": self["seed"], "net_id": spec.net_id, "task": spec.task,
+                            "width": spec.width, "kind": spec.kind, "alg": spec.alg,
+                            "network": self["network"],
+                            "train": self["train"].get(spec.kind) if spec.kind != "random"
+                            else None})
+
+    def unit_fingerprint(self, unit: "UnitSpec", net_fp: str) -> str:
+        """Everything that determines a unit's pairs and the content of each of its fits.
+
+        The grid (layers, k_fracs, seeds, shuffle_B) is not included: it decides which fit files
+        exist, not what is in them.
+        """
+        d = self["das"]
+        return fingerprint({"seed": self["seed"], "unit_id": unit.unit_id, "net": net_fp,
+                            "pairs": {"n_fit": unit.n_fit, "n_select": d["n_select"],
+                                      "n_test": d["n_test"], "base_uses": d["base_uses"],
+                                      "source_uses": d["source_uses"]},
+                            "fit": d["fit"]})
 
     def networks(self) -> list[NetworkSpec]:
         out = []

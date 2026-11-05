@@ -117,8 +117,9 @@ def make_splits(task: Task, hypothesis: str, sizes: dict, rng: np.random.Generat
             for s in SPLITS}
 
 
-def save_splits(splits: dict[str, PairSplit], path) -> None:
-    arrays = {}
+def save_splits(splits: dict[str, PairSplit], path, fingerprint: str = "") -> None:
+    """Save to a path or an open binary file; ``fingerprint`` identifies the settings."""
+    arrays = {"fingerprint": np.array(fingerprint)}
     for s, sp in splits.items():
         for name in ("base_x", "base_bits", "src_x", "src_bits", "pair_base", "pair_src",
                      "base_labels"):
@@ -126,6 +127,11 @@ def save_splits(splits: dict[str, PairSplit], path) -> None:
         for a, lab in sp.labels.items():
             arrays[f"{s}/label/{a}"] = lab
     np.savez_compressed(path, **arrays)
+
+
+def load_fingerprint(path) -> str:
+    z = np.load(path)
+    return str(z["fingerprint"]) if "fingerprint" in z.files else ""
 
 
 def load_splits(path) -> dict[str, PairSplit]:
