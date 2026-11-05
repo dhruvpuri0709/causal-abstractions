@@ -127,3 +127,9 @@ B = `analysis.bootstrap_B` replicates, 95% percentile intervals under three sche
 
 `bootstrap_widths.csv` gives the median interval width per scheme and the ratios base/iid and
 twoway/iid by task, class, width and n_fit (the planned preliminary result).
+
+**Caveat (measured in the pilot).** With each input used in at most 2 pairs, the two-way
+interval is about twice the iid width even for independent pairs: the product weights have
+E[w²] = 4 (one source) or 8 (two sources) against 2 for iid weights, so the product bootstrap
+over-counts the pair-level variance when clusters are this small. Treat it as a conservative
+bound, not as evidence of crossed dependence (see [running.md](running.md)).
