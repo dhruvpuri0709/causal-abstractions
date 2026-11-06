@@ -5,6 +5,16 @@ accuracy (IIA) from distributed alignment search (DAS) is at least c give a fals
 and do held-out evaluation, null calibration and selection correction fix it? See
 [`docs/proposal.tex`](docs/proposal.tex).
 
+## Setup
+
+```bash
+git clone --recurse-submodules git@github.com:nicholscrawford/causal-abstraction-statistics.git
+cd causal-abstraction-statistics
+uv sync
+```
+
+If you cloned without `--recurse-submodules`, run `git submodule update --init`.
+
 ## Quickstart
 
 ```bash
@@ -54,13 +64,3 @@ external/                        git submodules, pinned, read-only reference cod
 reproducing published results; our own code does not import from `external/`
 (pyvene is used only in an optional slow cross-check test). Neither research repo has a license, so we reference them as submodules rather than
 copying their code into ours.
-
-## Setup
-
-```bash
-git clone --recurse-submodules git@github.com:nicholscrawford/causal-abstraction-statistics.git
-cd causal-abstraction-statistics
-uv sync
-```
-
-If you cloned without `--recurse-submodules`, run `git submodule update --init`.

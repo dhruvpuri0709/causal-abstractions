@@ -28,19 +28,33 @@ Options:
   are dropped and flagged at the top of `summary.md`.
 * `cas reproduce --widths 16,64,256,1024`: override the random-network widths.
 
-**Resuming and config changes.** `train` skips networks and `fit` skips fits that already exist
-*with the same settings*. Every network, unit directory, pair file and fit stores a fingerprint
-of the config sections that produced it (`Config.network_fingerprint`,
-`Config.unit_fingerprint`). If you change those settings (training budget, `das.fit`, pair
-counts, seed, ...) and rerun, `train`/`fit`/`analyze` stop with an error naming the stale
-outputs. Then either give the config a new `name` or rerun with `--force`, which rebuilds only
-the mismatched outputs; for example, it retrains networks that failed under a smaller budget. Changing
-only the grid (`das.layers`, `k_fracs`, `seeds`, `null.shuffle_B`, network counts) keeps
-fingerprints: the missing fits are added and `analyze` reads exactly the configured grid.
-Partially written files end in `.part` and are ignored. Results produced before fingerprints
-existed (the first pilot) have none and must be cleared or renamed; the old pilot was moved to
-`results/pilot_before_fix_round/`. Same config → same results: all seeds derive from `seed` and
-object ids, and a test checks that 1 and 2 workers give identical fits. Each command appends its
+**Resuming and config changes.** `train` skips networks, and `fit` skips pair files and fits,
+that already exist *with the same settings*. Every network, unit directory (`unit.json`), pair
+file and fit stores a fingerprint of the config sections that produced it
+(`Config.network_fingerprint`, `Config.unit_fingerprint`; a unit's fingerprint includes its
+network's). If you change those settings (training budget, `das.fit`, pair counts, seed, ...)
+and rerun, `train`/`fit`/`analyze` stop with an error naming the stale outputs. Then either give
+the config a new `name` or rerun with `--force`, which rebuilds the mismatched outputs. Note what
+"mismatched" means: a network's fingerprint covers its whole `train.<kind>` section, so changing
+the IIT training budget makes **every** IIT network stale (and with it every unit of those
+networks), not only the ones that failed.
+
+* **Pass thresholds** (`train.<kind>.pass_*`) are *not* part of the fingerprint. `passed` is
+  recomputed from the stored accuracies whenever networks are loaded, so changing a threshold
+  needs no retraining. It just changes which networks are used.
+* **A unit directory whose `unit.json` is missing or unreadable** counts as stale.
+* **Within a unit, each pair file and fit is checked against its own fingerprint**, so
+  `fit --force` rebuilds exactly what does not match.
+* **Units of networks that fail their pass thresholds** are never fitted or analyzed. Their
+  directories are left alone and do not block `fit`.
+* **Changing only the grid** (`das.layers`, `k_fracs`, `seeds`, `null.shuffle_B`, network counts)
+  keeps fingerprints: the missing fits are added and `analyze` reads exactly the configured grid.
+* **Partially written files** (`.part`) are ignored; `.json` and `.npz` outputs are written via a
+  `.part` file and an atomic rename.
+* **Code changes are not covered**: after changing the code, use a new `name`.
+
+Same config → same results. All seeds derive from `seed` and object ids, and a test checks that
+1 and 2 workers give identical fits, shuffled fits and decisions. Each command appends its
 stage timings to `results/<name>/timings.log`.
 
 ## Configs
@@ -159,7 +173,7 @@ What the pilot does show:
   At c ≤ 0.85 the naive procedure certifies wrong algorithms; held-out evaluation and removing
   selection lower that, in the expected order. All threshold procedures certify (nearly) every
   wrong-algorithm network at c = 0.7. Restricted to the IIT layer (scope `site`), P1 certifies
-  8/12, 4/12 and 0/12 wrong-algorithm networks at c = 0.75, 0.8 and 0.85 (12/12, 8/12, 3/12 over
+  8/12, 4/12 and 0/12 wrong-algorithm networks at c = 0.75, 0.8 and 0.85 (10/12, 8/12, 3/12 over
   all layers). Part of the naive procedure's excess comes from other layers, where the "wrong"
   algorithm may genuinely be implemented.
 * Mean IIA (P1 naive / F_heldout_fixed): DL wrong-algorithm 0.818 / 0.748, positives
