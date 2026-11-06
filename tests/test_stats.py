@@ -117,3 +117,25 @@ def test_cluster_bootstrap_wider_than_binomial_when_clusters_agree():
     lo, hi = st.cluster_bootstrap_rate(clusters, y, 4000, np.random.default_rng(1))
     wlo, whi = st.wilson(12, 40)
     assert (hi - lo) > 1.15 * (whi - wlo) and lo <= 0.3 <= hi
+
+
+def test_cochran_permutation_matches_exact_enumeration():
+    """Exact null: every combination of within-row permutations.  Row totals vary, so a
+    version that shuffled entries across networks would give a different p."""
+    import itertools
+    x = np.array([[1, 1, 0], [1, 0, 0], [1, 1, 1], [1, 0, 0], [0, 1, 0], [1, 1, 0]])
+    q_obs, _ = st.cochran_q(x)
+    perms = [sorted(set(itertools.permutations(r))) for r in x]
+    qs = []
+    for combo in itertools.product(*perms):
+        qs.append(st.cochran_q(np.array(combo))[0])
+    qs = np.nan_to_num(np.array(qs), nan=-1)
+    p_exact = np.mean(qs >= q_obs - 1e-12)
+    _, p_perm = st.cochran_q_permutation(x, n_perm=20000, rng=np.random.default_rng(1))
+    assert abs(p_perm - p_exact) < 0.01  # Monte Carlo SE ~0.002
+    # shuffling entries across rows (ignoring row totals) gives a clearly different answer
+    rng = np.random.default_rng(2)
+    flat = np.array([st.cochran_q(rng.permutation(x.ravel()).reshape(x.shape))[0]
+                     for _ in range(20000)])
+    p_wrong = np.mean(np.nan_to_num(flat, nan=-1) >= q_obs - 1e-12)
+    assert abs(p_wrong - p_exact) > 0.03  # exact 0.123 vs 0.078
