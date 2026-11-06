@@ -31,7 +31,7 @@ from .bootstrap import METHODS, bootstrap_iia, percentile_interval
 from .config import Config, derive_seed
 from .pairs import load_fingerprint, load_splits
 from .pipeline import (StaleOutputError, expected_unit_fingerprints, fit_name,
-                       read_unit_fingerprint, shuffle_name, unit_dir)
+                       load_network_meta, shuffle_name, unit_dir, unit_state)
 from .procedures import (ALL_PROCS, CELL, PROC_INFO, THRESHOLD_PROCS, add_null_pvalues,
                          decisions, unit_statistics)
 
@@ -53,8 +53,7 @@ class IncompleteError(SystemExit):
 def load_units(cfg: Config) -> pd.DataFrame:
     rows = []
     for u in cfg.units():
-        meta_path = cfg.out_dir / "networks" / f"{u.net_id}.json"
-        meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        meta = load_network_meta(cfg, u.net_id) or {}  # `passed` uses current thresholds
         layer, k, _ = cfg.fixed_config(u.width)
         rows.append({**u.__dict__, "fixed_layer": layer, "fixed_k": k,
                      "net_passed": meta.get("passed", np.nan),
@@ -78,7 +77,7 @@ def load_fits(cfg: Config, units: pd.DataFrame):
     for u in tqdm(list(units.itertuples()), desc="load fits"):
         fp = expected[u.unit_id]
         d = unit_dir(cfg, u.unit_id)
-        if read_unit_fingerprint(cfg, u.unit_id) not in (None, fp):
+        if unit_state(cfg, u.unit_id, fp) == "stale":
             stale.append(u.unit_id)
             continue
         if (d / "pairs.npz").exists() and load_fingerprint(d / "pairs.npz") != fp:
@@ -197,6 +196,8 @@ def threshold_sweep(dec_all: pd.DataFrame, thresholds, seed: int):
     for c in thresholds:
         d = recertify(dec_all, c)
         for key, g in d.groupby(HCELL + ["truth_class", "procedure"]):
+            if g.dropna(subset=["certified"])["net_id"].duplicated().any():
+                raise ValueError(f"sweep cell {key} has several units per network")
             cells.append(dict(zip(HCELL + ["truth_class", "procedure"], key), c=c)
                          | rate_row(g["certified"]))
         p = pooled_rates(d, ["task", "truth_class", "procedure"], seed, B=500)
@@ -251,10 +252,14 @@ def paired_tests(dec_all: pd.DataFrame, seed: int) -> pd.DataFrame:
     """
     rows = []
     for key, g in dec_all.groupby(HCELL + ["truth_class"]):
+        if g.groupby(["net_id", "procedure"]).size().gt(1).any():
+            raise ValueError(f"cell {key} has several units per network")
         wide = g.pivot_table(index="net_id", columns="procedure", values="certified",
-                             aggfunc="first")
-        assert not g.groupby(["net_id", "procedure"]).size().gt(1).any()
-        wide = wide[[p for p in ALL_PROCS if p in wide and wide[p].notna().all()]].dropna()
+                             aggfunc="first", dropna=False)
+        # procedures that exist in this cell (e.g. no wrong-algorithm null for HE) ...
+        wide = wide[[p for p in ALL_PROCS if p in wide and wide[p].notna().any()]]
+        # ... and only the networks with a decision under every one of them
+        wide = wide[wide.notna().all(axis=1)]
         if wide.shape[1] < 2 or len(wide) < 2:
             continue
         prim = wide[[p for p in PRIMARY if p in wide]]
