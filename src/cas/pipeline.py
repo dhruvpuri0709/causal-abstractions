@@ -11,8 +11,10 @@ Layout under results/<name>/:
 **Fingerprints.**  Every network, unit directory, pair file and fit records a hash of the config
 settings that produced it (``Config.network_fingerprint`` / ``Config.unit_fingerprint``; a unit's
 fingerprint includes its network's).  Reusing an output whose fingerprint differs from the
-current config is refused with an error; ``--force`` rebuilds exactly the mismatched outputs
-(e.g. networks that failed under a smaller training budget), or use a new ``name``.  Changing
+current config is refused with an error; ``--force`` rebuilds the mismatched outputs, or use a
+new ``name``.  A unit directory without a readable ``unit.json`` is stale; inside a unit, the
+pair file and each fit are checked against their own fingerprint.  Pass thresholds are not
+fingerprinted: ``passed`` is recomputed from stored accuracies (``network_passed``).  Changing
 only the grid (layers, k_fracs, seeds, shuffle_B) keeps fingerprints: the missing fits are added.
 Partially written files end in ``.part`` and are never read.
 """
@@ -31,7 +33,7 @@ import torch
 from .config import Config, NetworkSpec, UnitSpec, derive_seed, iit_k
 from .das import FitSettings, fit_rotation, pair_activations, predict
 from .models import load_network, save_network
-from .pairs import SPLITS, load_splits, make_splits, save_splits
+from .pairs import SPLITS, load_fingerprint, load_splits, make_splits, save_splits
 from .parallel import run_jobs
 from .tasks import TASKS
 from .train import iit_accuracy, new_network, task_accuracy, train_iit, train_standard
@@ -41,6 +43,40 @@ FINAL_EVAL_N = 10000
 
 class StaleOutputError(SystemExit):
     pass
+
+
+def read_json(path: Path) -> dict | None:
+    """Parsed JSON object, or None if the file is missing, truncated or not valid JSON."""
+    try:
+        obj = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def write_json(path: Path, obj: dict) -> None:
+    tmp = path.with_name(path.name + ".part")
+    tmp.write_text(json.dumps(obj, indent=2))
+    os.replace(tmp, path)
+
+
+def network_passed(cfg: Config, meta: dict) -> bool:
+    """Pass/fail from the stored accuracies and the *current* pass thresholds."""
+    if meta["kind"] == "random":
+        return True
+    s = cfg["train"][meta["kind"]]
+    if meta["kind"] == "standard":
+        return bool(meta["task_acc"] >= s["pass_acc"])
+    return bool(meta["task_acc"] >= s["pass_acc"]
+                and meta[f"neuron_iia_{meta['alg']}"] >= s["pass_iit_acc"])
+
+
+def load_network_meta(cfg: Config, net_id: str) -> dict | None:
+    """Stored metadata with ``passed`` recomputed for the current config (None if unreadable)."""
+    meta = read_json(network_path(cfg, net_id).with_suffix(".json"))
+    if meta is not None:
+        meta["passed"] = network_passed(cfg, meta)
+    return meta
 
 
 def network_path(cfg: Config, net_id: str) -> Path:
@@ -72,10 +108,9 @@ def build_network(job) -> dict:
     cfg, spec, device = Config(job["cfg"]), NetworkSpec(**job["spec"]), job["device"]
     path = network_path(cfg, spec.net_id)
     fp = cfg.network_fingerprint(spec)
-    if path.with_suffix(".json").exists():
-        meta = json.loads(path.with_suffix(".json").read_text())
-        if meta.get("fingerprint") == fp:
-            return meta
+    meta = load_network_meta(cfg, spec.net_id)
+    if meta is not None and meta.get("fingerprint") == fp:
+        return meta
     task = TASKS[spec.task]
     layer, k = cfg["network"]["iit_layer"], iit_k(spec.width, cfg)
     model = new_network(task, spec.width, cfg["network"]["n_layers"], spec.seed).to(device)
@@ -93,14 +128,7 @@ def build_network(job) -> dict:
     for alg in task.algorithms:  # neuron-aligned IIA at the IIT site, for every algorithm
         meta[f"neuron_iia_{alg}"] = iit_accuracy(model, task, alg, layer, k, FINAL_EVAL_N,
                                                  eval_rng, device)
-    if spec.kind == "random":
-        meta["passed"] = True
-    elif spec.kind == "standard":
-        meta["passed"] = meta["task_acc"] >= cfg["train"]["standard"]["pass_acc"]
-    else:
-        s = cfg["train"]["iit"]
-        meta["passed"] = bool(meta["task_acc"] >= s["pass_acc"]
-                              and meta[f"neuron_iia_{spec.alg}"] >= s["pass_iit_acc"])
+    meta["passed"] = network_passed(cfg, meta)  # recomputed on every load
     save_network(model.cpu(), meta, path)
     return meta
 
@@ -112,8 +140,9 @@ def network_status(cfg: Config) -> dict[str, str]:
         p = network_path(cfg, spec.net_id).with_suffix(".json")
         if not p.exists():
             out[spec.net_id] = "missing"
-        else:
-            fp = json.loads(p.read_text()).get("fingerprint")
+        else:  # unreadable or truncated JSON counts as stale, so --force can rebuild it
+            meta = read_json(p)
+            fp = meta.get("fingerprint") if meta else None
             out[spec.net_id] = "ok" if fp == cfg.network_fingerprint(spec) else "stale"
     return out
 
@@ -152,14 +181,36 @@ def expected_unit_fingerprints(cfg: Config) -> dict[str, str]:
 
 
 def read_unit_fingerprint(cfg: Config, unit_id: str) -> str | None:
-    p = unit_dir(cfg, unit_id) / "unit.json"
-    return json.loads(p.read_text())["fingerprint"] if p.exists() else None
+    meta = read_json(unit_dir(cfg, unit_id) / "unit.json")
+    return meta.get("fingerprint") if meta else None
+
+
+def unit_state(cfg: Config, unit_id: str, fp: str) -> str:
+    """'absent' (no directory or an empty one), 'ok', or 'stale' (a directory whose unit.json
+    is missing, unreadable or has another fingerprint)."""
+    d = unit_dir(cfg, unit_id)
+    if not d.exists() or not any(d.iterdir()):
+        return "absent"
+    return "ok" if read_unit_fingerprint(cfg, unit_id) == fp else "stale"
+
+
+def _file_fingerprint(path: Path) -> str | None:
+    """Fingerprint stored in a fit file's meta, or None if missing/unreadable."""
+    try:
+        with np.load(path) as z:
+            return json.loads(str(z["meta"])).get("fingerprint")
+    except Exception:  # noqa: BLE001 - truncated or foreign file: treat as stale
+        return None
 
 
 def get_pairs(cfg: Config, unit: UnitSpec, fp: str):
     path = unit_dir(cfg, unit.unit_id) / "pairs.npz"
     if path.exists():
-        return load_splits(path)
+        try:
+            if load_fingerprint(path) == fp:
+                return load_splits(path)
+        except Exception:  # noqa: BLE001 - unreadable: regenerate
+            pass
     d = cfg["das"]
     sizes = {"fit": unit.n_fit, "select": d["n_select"], "test": d["n_test"]}
     splits = make_splits(TASKS[unit.task], unit.hypothesis, sizes,
@@ -175,20 +226,20 @@ def get_pairs(cfg: Config, unit: UnitSpec, fp: str):
 def fit_unit(job) -> dict:
     cfg, unit, device = Config(job["cfg"]), UnitSpec(**job["unit"]), job["device"]
     fp = job["fingerprint"]
-    meta_path = network_path(cfg, unit.net_id).with_suffix(".json")
-    if not json.loads(meta_path.read_text())["passed"]:
+    if not load_network_meta(cfg, unit.net_id)["passed"]:
         return {"unit_id": unit.unit_id, "skipped": "network failed training targets",
                 "fits": 0}
     d = unit_dir(cfg, unit.unit_id)
-    if read_unit_fingerprint(cfg, unit.unit_id) not in (None, fp):
+    if unit_state(cfg, unit.unit_id, fp) == "stale":
         shutil.rmtree(d)  # only reached with --force (fit_all refuses stale units otherwise)
     d.mkdir(parents=True, exist_ok=True)
-    (d / "unit.json").write_text(json.dumps({"unit_id": unit.unit_id, "fingerprint": fp}))
+    write_json(d / "unit.json", {"unit_id": unit.unit_id, "fingerprint": fp})
     configs = cfg.das_configs(unit.width)
     fixed = cfg.fixed_config(unit.width)
     shuffle_B = cfg["null"]["shuffle_B"] if unit.role == "eval" else 0
-    todo = [c for c in configs if not (d / fit_name(*c)).exists()]
-    todo_shuffle = [b for b in range(shuffle_B) if not (d / shuffle_name(b)).exists()]
+    # decide per file by its stored fingerprint, not by existence
+    todo = [c for c in configs if _file_fingerprint(d / fit_name(*c)) != fp]
+    todo_shuffle = [b for b in range(shuffle_B) if _file_fingerprint(d / shuffle_name(b)) != fp]
     if not todo and not todo_shuffle:
         return {"unit_id": unit.unit_id, "fits": 0}
 
@@ -250,8 +301,11 @@ def fit_all(cfg: Config, workers: int, device: str, force: bool = False) -> list
                          f"settings (e.g. {bad[0]}: {status[bad[0]]}); run `cas train` first")
     units = cfg.units()
     expected = expected_unit_fingerprints(cfg)
-    stale = [u.unit_id for u in units
-             if read_unit_fingerprint(cfg, u.unit_id) not in (None, expected[u.unit_id])]
+    passed = {n: load_network_meta(cfg, n)["passed"] for n in status}
+    # units of networks that fail are never fitted or analyzed, so their directories are left
+    # alone (and do not block a plain `cas fit`)
+    stale = [u.unit_id for u in units if passed[u.net_id]
+             and unit_state(cfg, u.unit_id, expected[u.unit_id]) == "stale"]
     if stale and not force:
         _stale("fit directories", stale, cfg)
     if stale:

@@ -9,6 +9,7 @@ the task label True.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import torch
@@ -71,8 +72,12 @@ def handcrafted_hierarchical_equality(emb_dim: int = 2) -> MLP:
 def save_network(model: MLP, meta: dict, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     meta = dict(meta, d_in=model.d_in, width=model.width, n_layers=model.n_layers)
-    torch.save({"state_dict": model.state_dict(), "meta": meta}, path.with_suffix(".pt"))
-    path.with_suffix(".json").write_text(json.dumps(meta, indent=2))
+    # write both files atomically (.part + rename); the .json last, as the "done" marker
+    pt, js = path.with_suffix(".pt"), path.with_suffix(".json")
+    torch.save({"state_dict": model.state_dict(), "meta": meta}, pt.with_name(pt.name + ".part"))
+    os.replace(pt.with_name(pt.name + ".part"), pt)
+    js.with_name(js.name + ".part").write_text(json.dumps(meta, indent=2))
+    os.replace(js.with_name(js.name + ".part"), js)
 
 
 def load_network(path: Path, device: str = "cpu") -> tuple[MLP, dict]:

@@ -157,12 +157,17 @@ class Config(dict):
 
     # ---- fingerprints ----------------------------------------------------------------------
     def network_fingerprint(self, spec: "NetworkSpec") -> str:
-        """Everything that determines a network's weights."""
+        """Everything that determines a network's weights.
+
+        Pass thresholds (``train.<kind>.pass_*``) are excluded: they do not change the weights,
+        and ``passed`` is recomputed from the stored accuracies (``pipeline.network_passed``).
+        """
         return fingerprint({"seed": self["seed"], "net_id": spec.net_id, "task": spec.task,
                             "width": spec.width, "kind": spec.kind, "alg": spec.alg,
                             "network": self["network"],
-                            "train": self["train"].get(spec.kind) if spec.kind != "random"
-                            else None})
+                            "train": ({k: v for k, v in self["train"][spec.kind].items()
+                                       if not k.startswith("pass_")}
+                                      if spec.kind != "random" else None)})
 
     def unit_fingerprint(self, unit: "UnitSpec", net_fp: str) -> str:
         """Everything that determines a unit's pairs and the content of each of its fits.
