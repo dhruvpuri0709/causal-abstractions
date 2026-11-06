@@ -1,0 +1,46 @@
+# Pilot: the whole pipeline end to end in about 10 minutes on an 8-core M1 CPU.
+# Small on purpose: few networks per class, one fitting-set size, two subspace sizes.
+# Rates from this design are for checking the pipeline, not for inference.
+name: pilot
+seed: 20261105
+results_dir: results
+
+tasks:
+  hierarchical_equality: {widths: [16, 32]}   # 16-dim input (4 objects x 4 dims)
+  distributive_law: {widths: [24]}            # 24-dim input (6 objects x 4 dims)
+
+network:
+  n_layers: 3
+  iit_layer: 1        # IIT site L* (0-based hidden layer) = the pre-registered DAS site
+  iit_k_frac: 0.25    # k* = 0.25 x width per variable (V1 in neurons [0,k*), V2 in [k*,2k*))
+
+networks:             # per (task, width); IIT counts are per algorithm
+  eval: {iit: 6, random: 6, standard: 2}
+  calibration: {random: 19, iit: 19}   # B = 19 is the minimum for p = 1/(1+B) <= 0.05
+
+train:
+  standard: {lr: 0.001, batch_size: 1024, max_steps: 20000, eval_every: 250, eval_n: 4000,
+             target_acc: 0.995, pass_acc: 0.99}
+  iit: {lr: 0.001, batch_size: 1024, max_steps: 20000, eval_every: 250, eval_n: 4000,
+        target_acc: 0.995, target_iit_acc: 0.99, pass_acc: 0.99, pass_iit_acc: 0.98}
+
+das:
+  layers: [0, 1, 2]
+  k_fracs: [0.25, 0.5]   # k = round(frac x width); k* is always added
+  seeds: 2               # rotation seeds per (layer, k)
+  n_fit: [512]
+  n_select: 1024
+  n_test: 1024
+  base_uses: 2           # each base input appears in at most 2 pairs
+  source_uses: 2         # each source input appears in at most 2 pairs
+  fit: {lr: 0.01, batch_size: 128, max_steps: 4000, window: 50, patience: 5, tol: 0.001,
+        min_loss: 0.001}
+
+null:
+  shuffle_B: 19          # shuffled-label refits per evaluation unit (fixed config only)
+
+analysis:
+  threshold: 0.9
+  thresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.95, 0.99, 1.0]
+  alpha: 0.05
+  bootstrap_B: 2000

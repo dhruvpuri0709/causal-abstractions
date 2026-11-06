@@ -1,0 +1,32 @@
+# `uv run cas reproduce` -- checks against Geiger et al. (2024) §4 (Table 1) and §4.4.
+name: reproduce
+seed: 7
+results_dir: results
+
+trained:            # Table 1 analogue: hierarchical equality, |N| = 16
+  width: 16
+  n_layers: 3
+  layers: [0, 1, 2]  # 0-based; the paper's "Layer 1" is our layer 0
+  ks: [1, 2, 8]      # per-variable subspace size (paper's "intervention size")
+  seeds: 3           # rotation seeds; best by in-sample IIA, as in the paper
+  n_fit: 8192        # the paper used 640K DAS training pairs
+  n_test: 2048
+  iit_layer: 0       # for the IIT-trained network
+  iit_k: 4
+  standard_seeds: 5  # extra standard networks to show seed-to-seed variation at (layer 0, k 8)
+
+random:             # §4.4 analogue: frozen random networks, k = N/2, first layer
+  widths: [16, 64, 256]   # add 1024 with --widths 16,64,256,1024 (slow); 4096 is impractical
+  seeds: 3
+  n_fit: 8192
+  n_test: 2048
+  fit: {batch_size: 512}
+
+fit: {lr: 0.01, batch_size: 128, max_steps: 4000, window: 50, patience: 5, tol: 0.001,
+      min_loss: 0.001}
+
+train:
+  standard: {lr: 0.001, batch_size: 1024, max_steps: 20000, eval_every: 250, eval_n: 4000,
+             target_acc: 0.995}
+  iit: {lr: 0.001, batch_size: 1024, max_steps: 20000, eval_every: 250, eval_n: 4000,
+        target_acc: 0.995, target_iit_acc: 0.99}
