@@ -4,11 +4,11 @@
 
 ```bash
 uv sync
-uv run pytest                    # 47 tests, ~40 s (includes a converging end-to-end run)
+uv run pytest                    # 52 tests, ~55 s (includes converging end-to-end runs)
 uv run pytest -m slow            # cross-check against pyvene's RotatedSpaceIntervention, ~7 s
 uv run cas reproduce             # ~70 s -> results/reproduce/report.md
 uv run cas plan --config configs/pilot.yaml      # design size, no computation
-uv run cas pilot                 # = cas run --config configs/pilot.yaml, ~7.5 min
+uv run cas pilot                 # = cas run --config configs/pilot.yaml, ~7 min
 uv run cas run     --config configs/full.yaml    # train -> fit -> analyze
 uv run cas train   --config configs/full.yaml    # or each stage separately; all resumable
 uv run cas fit     --config configs/full.yaml
@@ -62,21 +62,23 @@ stage timings to `results/<name>/timings.log`.
 | Config | Design | Time |
 |---|---|---|
 | `configs/reproduce.yaml` | Sections 1–4 of `cas reproduce` | 68 s measured |
-| `configs/pilot.yaml` | HE widths 16, 32; DL width 24. Per (task, width): 6 IIT evaluation networks (per algorithm), 6 random, 2 standard; 19 random + 19 IIT (per algorithm, DL only) calibration networks. Layers 0–2 × k ∈ {w/4, w/2} × 2 seeds; n_fit = 512, select/test 1024 pairs; 19 shuffled refits per unit. 143 networks, 182 units, 2184 DAS fits + 1292 shuffled fits | 448 s measured (train 85 s, fit 333 s, analyze 27 s), 67 MB |
-| `configs/full.yaml` | HE widths 16, 32, 64; DL widths 24, 48, 96. 30 IIT / 30 random / 10 standard evaluation networks; 39 + 39 calibration networks (B = 39). Layers 0–2 × k ∈ {w/8, w/4, w/2} × 3 seeds; n_fit ∈ {256, 1024, 4096}; 39 shuffled refits. 978 networks (564 trained), 4185 units, 112 995 DAS fits + 46 170 shuffled fits | **estimated ~6–7 h** with 8 workers, ~3 GB |
+| `configs/pilot.yaml` | HE widths 16, 32; DL width 24. Per (task, width): 6 IIT evaluation networks (per algorithm), 6 random, 2 standard; 19 random + 19 IIT (per algorithm, DL only) calibration networks. Layers 0–2 × k ∈ {w/4, w/2} × 2 seeds; n_fit = 512, select/test 1024 pairs; 19 shuffled refits per unit. 143 networks, 182 units, 2184 DAS fits + 1292 shuffled fits | 426 s measured (train 79 s, fit 318 s, analyze 27 s), 69 MB |
+| `configs/full.yaml` | HE widths 16, 32, 64; DL widths 24, 48, 96. 30 IIT / 30 random / 10 standard evaluation networks; 39 + 39 calibration networks (B = 39). Layers 0–2 × k ∈ {w/8, w/4, w/2} × 3 seeds; n_fit ∈ {256, 1024, 4096}; 39 shuffled refits. 978 networks (564 trained), 4185 units, 112 995 DAS fits + 46 170 shuffled fits | **estimated ~6–6.5 h** with 8 workers, ~4–5 GB |
 
 **How the full-design estimate was made.**
 
 * **Fitting, ~5.4 h wall with 8 workers.**
   * Pilot mean wall time per fit with 8 concurrent workers: 0.44 s (width 16), 0.73 s (width 24),
-    0.60 s (width 32). The step budget does not depend on n_fit.
+    0.57 s (width 32). The step budget does not depend on n_fit.
   * Single-process fits at widths 48, 64 and 96 (IIT networks, 4096 pairs) took 0.4–1.1 s,
     0.3–1.1 s and 0.8–1.9 s.
   * Assuming 0.9 s (48, 64) and 1.6 s (96) per fit under 8-way load gives ~43 worker-hours.
-* **Training 564 networks:** estimated 15–30 min. The pilot trained 68 in 85 s, and wider
+* **Training 564 networks:** estimated 15–25 min. The pilot trained 68 in 79 s, and wider
   networks are slower.
-* **Analysis:** estimated 15–30 min.
-* **Storage:** ~3 GB (the pilot used 63 MB for 3476 fits).
+* **Analysis:** estimated 10–20 min (pilot: 27 s for 182 units; full: 4185 units).
+* **Storage:** ~4–5 GB. The pilot used 64 MB for 3476 fits, about 18 KB per fit, which
+  scales to ~2.9 GB for 159k fits. Full fits store more pairs per fit (n_fit averages 1792
+  against 512, plus 2048 select/test pairs), about 1.5× more per fit.
 
 These are extrapolations; the full design has not been run.
 
@@ -115,9 +117,10 @@ in-sample IIA as in the paper; our layer 0 = paper's Layer 1):
 4. **Timing**: one DAS fit (width 16, layer 0, k = 8, 8192 pairs) took 0.75 s for 1300 steps
    (0.58 ms/step). Width 256: 4.0 s per fit.
 
-## Pilot results (rerun after the review fixes, 2026-11-05)
+## Pilot results (rerun after the review fixes, 2026-11-05; rerun again 2026-11-06)
 
-`uv run cas pilot`: 448 s wall (train 85 s, fit 333 s, analyze 27 s). No network failed its
+`uv run cas pilot`: 426 s wall (train 79 s, fit 318 s, analyze 27 s) in the 2026-11-06 rerun with
+the final fingerprints. Its decisions and rate tables are identical to the 2026-11-05 rerun. No network failed its
 training targets (0 / 143), no DAS fit (0 / 2184) and no shuffled fit (0 / 1292) failed to
 converge. The decisions are identical to the first pilot run; what changed is how they are
 counted. Each network now appears once per cell. In the first version of `running.md`, "n = 12"
