@@ -76,7 +76,8 @@ class PairActivations:
         return self.h_base.shape[0]
 
     def with_labels(self, labels: torch.Tensor) -> "PairActivations":
-        return PairActivations(self.h_base, self.h_src, self.mask, labels)
+        return PairActivations(self.h_base, self.h_src, self.mask,
+                               labels.to(self.h_base.device))
 
 
 def pair_activations(model: MLP, layer: int, x_base: torch.Tensor, x_src: torch.Tensor,

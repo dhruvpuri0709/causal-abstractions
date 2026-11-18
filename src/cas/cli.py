@@ -20,6 +20,16 @@ from .config import Config
 
 PILOT = "configs/pilot.yaml"
 DEFAULT_WORKERS = min(8, os.cpu_count() or 1)
+DEVICE_HELP = ("cpu (default; faster for these small networks), mps, or auto "
+               "(mps if available, else cpu)")
+
+
+def resolve_device(device: str) -> str:
+    """``auto`` -> ``mps`` when the PyTorch MPS backend is available, else ``cpu``."""
+    if device != "auto":
+        return device
+    import torch
+    return "mps" if torch.backends.mps.is_available() else "cpu"
 
 
 def _compute(p, config_default=None, stages=("train", "fit", "analyze")):
@@ -28,7 +38,7 @@ def _compute(p, config_default=None, stages=("train", "fit", "analyze")):
     else:
         p.add_argument("--config", required=True, help="YAML config")
     if "train" in stages or "fit" in stages:
-        p.add_argument("--device", default="cpu", help="cpu (default) or mps")
+        p.add_argument("--device", default="cpu", help=DEVICE_HELP)
         p.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                        help="worker processes (default: min(8, CPU count) = %(default)s)")
         p.add_argument("--force", action="store_true",
@@ -60,7 +70,7 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("reproduce", help="reproduce Geiger et al. 2024 checks; time a DAS fit")
     r.add_argument("--config", default="configs/reproduce.yaml")
-    r.add_argument("--device", default="cpu")
+    r.add_argument("--device", default="cpu", help=DEVICE_HELP)
     r.add_argument("--workers", type=int, default=DEFAULT_WORKERS,
                    help="torch CPU threads (reproduce runs its fits one after another); "
                         "default %(default)s")
@@ -76,6 +86,9 @@ def main(argv=None):
     _compute(sub.add_parser("run", help="train -> fit -> analyze"))
     _compute(sub.add_parser("pilot", help=f"run all stages on {PILOT}"), config_default=PILOT)
     args = ap.parse_args(argv)
+    if hasattr(args, "device"):
+        args.device = resolve_device(args.device)
+        print(f"device: {args.device}")
 
     if args.cmd == "reproduce":
         import torch

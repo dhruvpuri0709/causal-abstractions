@@ -439,7 +439,10 @@ def analyze(cfg: Config, allow_incomplete: bool = False) -> Path:
     fits = fits.merge(units[["unit_id", "task", "width", "kind", "role", "truth_class"]],
                       on="unit_id")
     fits.to_csv(tables / "fits.csv", index=False)
-    shuf.to_csv(tables / "shuffle_fits.csv", index=False)
+    # shuffle_B = 0 turns the shuffled-label null off: drop its procedure from every output
+    dropped = {"P3_null_shuffled"} if cfg["null"]["shuffle_B"] == 0 else set()
+    if not dropped:
+        shuf.to_csv(tables / "shuffle_fits.csv", index=False)
 
     nets = units.drop_duplicates("net_id")
     excl_nets = (nets.groupby(["task", "width", "kind", "alg", "role"], dropna=False)
@@ -462,12 +465,14 @@ def analyze(cfg: Config, allow_incomplete: bool = False) -> Path:
     ev["log2_width"] = np.log2(ev.width)
     ev["k_frac"] = ev.scope_k / ev.width
     ev["log_n_fit"] = np.log(ev.n_fit)
-    ev.to_csv(tables / "unit_statistics.csv", index=False)
+    ev.drop(columns=[c for p in dropped for c in (p, f"B_{p}")], errors="ignore").to_csv(
+        tables / "unit_statistics.csv", index=False)
     ustats.merge(units, on="unit_id").query("role == 'cal'").to_csv(
         tables / "calibration_statistics.csv", index=False)
     null_sizes.to_csv(tables / "null_sizes.csv", index=False)
 
     dec = decisions(ev, c, alpha)
+    dec = dec[~dec.procedure.isin(dropped)]
     dec.to_csv(tables / "decisions.csv", index=False)
     dec_main = dec[dec.scope.isin(["all", "site"])]
     dec_all = dec[dec.scope == "all"]
@@ -502,7 +507,7 @@ def analyze(cfg: Config, allow_incomplete: bool = False) -> Path:
     plot_bootstrap(boot, figdir)
 
     summary = write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline,
-                            pooled, paired, reg, bw, ev_all, time.perf_counter() - t0)
+                            pooled, paired, reg, bw, ev_all, time.perf_counter() - t0, dropped)
     print(f"analysis written to {out} (summary: {summary})")
     return summary
 
@@ -555,7 +560,7 @@ def headline_table(headline: pd.DataFrame, scope: str, classes) -> str:
 
 
 def write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline, pooled,
-                  paired, reg, bw, ev_all, seconds) -> Path:
+                  paired, reg, bw, ev_all, seconds, dropped=frozenset()) -> Path:
     a = cfg["analysis"]
     c, alpha = a["threshold"], a["alpha"]
     L = [f"# Results: `{cfg['name']}`\n",
@@ -577,7 +582,9 @@ def write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline, 
     L.append(f"- Networks failing their training targets (excluded): "
              f"{int(excl_nets.failed.sum())} of {int(excl_nets.networks.sum())}.\n"
              f"- DAS fits not converged (excluded): {nc} of {len(fits)}.\n"
-             f"- Shuffled-null fits not converged (excluded): {nsc} of {len(shuf)}.\n")
+             + ("- Shuffled-label null not run (`null.shuffle_B = 0`); `P3_null_shuffled` is "
+                "omitted.\n" if "P3_null_shuffled" in dropped else
+                f"- Shuffled-null fits not converged (excluded): {nsc} of {len(shuf)}.\n"))
     small = null_sizes[(null_sizes.B_fixed < 19) | (null_sizes.B_max < 19)]
     if len(small):
         L.append(f"- **Warning**: {len(small)} calibration nulls have B < 19, so "
@@ -602,7 +609,8 @@ def write_summary(cfg, fits, shuf, incomplete, excl_nets, null_sizes, headline, 
 
     L.append("\n## Procedures\n")
     L.append(_md(pd.DataFrame([{"procedure": p, "evaluated on": v[0], "configuration": v[1],
-                                "meaning": v[2]} for p, v in PROC_INFO.items()])))
+                                "meaning": v[2]} for p, v in PROC_INFO.items()
+                               if p not in dropped])))
 
     L.append(f"\n## Headline: certified / networks at c = {c}, scope `all` (all layers)\n")
     L.append("Each table is one cell (task, hypothesis, n_fit) pooled over widths; every "
