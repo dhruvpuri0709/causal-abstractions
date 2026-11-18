@@ -1,6 +1,6 @@
 # Papers
 
-PDFs of the works cited in `../proposal.tex`, named by BibTeX key.
+Works cited in `../proposal.tex`, by BibTeX key. PDFs are not included in this repository; use the links below.
 
 | Key | Paper | Source | Role in the project |
 |---|---|---|---|
